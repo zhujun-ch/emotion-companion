@@ -1,0 +1,44 @@
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+project.private.config.json
+project.config.json
+*.pem
+*.key
+credentials*.json
+
+# Python and JavaScript environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+node_modules/
+dist/
+unpackage/
+.idea/
+.vscode/
+
+# Datasets, model weights, and private conversation exports
+data/raw/
+data/processed/
+data/private/
+artifacts/
+checkpoints/
+exports/
+*.pth
+*.pt
+*.joblib
+*.pkl
+*.onnx
+*.sql
+!database/migrations/*.sql
+*.log
+
+# Document generation intermediates
+~$*
+_qa/
+_build/
+
