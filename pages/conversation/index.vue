@@ -70,7 +70,14 @@
               </view>
               <view class="reference-note">{{ latestReferenceMessage.feedback ? '已保存你的反馈，你的感受由你来定义。' : '只是近期文字的参考，你的感受由你来定义。' }}</view>
             </template>
-            <text v-else>{{ latestReferenceMessage.emotion_reference.reason }}</text>
+            <view v-else>
+              <view>{{ latestReferenceMessage.emotion_reference.reason }}</view>
+              <view v-if="latestReferenceMessage.emotion_reference.candidates?.length" class="reference-main">
+                <text v-if="latestReferenceMessage.feedback && !latestReferenceMessage.feedback.agreed">你的更正 · {{ latestReferenceMessage.feedback.correction || '说不准' }}</text>
+                <text v-else>初步参考 · {{ latestReferenceMessage.emotion_reference.candidates.join(' / ') }}（不确定）</text>
+                <view class="reference-actions"><button :disabled="isFeedbackSaving" @click="disagreeWithReference(latestReferenceMessage)">更正我的感受</button></view>
+              </view>
+            </view>
           </view>
           <view v-if="error" class="error-notice" role="alert"><text>{{ error }}</text><button :disabled="isLoading || isInitializing" @click="retry">重试</button></view>
           <view class="composer" :class="{ 'composer-busy': isLoading }">
