@@ -42,9 +42,12 @@ class EmotionPredictor:
         self.model = TextCNN(**self.config['model'])
         self.model.load_state_dict(torch.load(self.directory/'best_model.pt', map_location='cpu', weights_only=True))
         self.model.eval()
-    def predict(self, text):
+    def probabilities(self, text, temperature=1.0):
         x = torch.tensor([encode(tokenize(text),self.vocab,self.config['max_len'])],dtype=torch.long)
         with torch.inference_mode():
-            probs = self.model(x).softmax(dim=1)[0]
+            probs = (self.model(x) / temperature).softmax(dim=1)[0]
+        return probs.tolist()
+    def predict(self, text):
+        probs = torch.tensor(self.probabilities(text))
         score, label = probs.max(dim=0)
         return self.config['label_names'][label.item()], score.item()

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from conversation_store import ConversationStore
 from threading import Lock
 from emotion_model import EmotionPredictor
+from emotion_reference import EmotionReference
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -23,6 +24,7 @@ EMOTION_MODEL_DIR = BASE_DIR / os.getenv("EMOTION_MODEL_DIR", "artifacts/emotion
 torch.set_num_threads(int(os.getenv("EMOTION_CPU_THREADS", "4")))
 print("正在加载训练后的六分类 TextCNN...")
 emotion_predictor = EmotionPredictor(EMOTION_MODEL_DIR)
+emotion_reference_policy = EmotionReference(emotion_predictor)
 print("情绪模型加载完成：", ", ".join(emotion_predictor.config['label_names']))
 
 
@@ -73,8 +75,11 @@ def ask_ollama(user_text, emotion_label, history=None):
         "你是一个温暖、有共情力的心理陪伴者。"
         "用户正在向你倾诉，请用温和、支持性的语气回复，"
         "不要给出医学诊断，不要评判用户。"
-        f"当前识别到的情绪倾向是：{emotion_label}。"
     )
+    if emotion_label:
+        system_prompt += f"近期文字表达可能偏向：{emotion_label}。这只是辅助参考，不要复述标签，优先回应用户原话。"
+    else:
+        system_prompt += "目前不预设用户的情绪，请结合上下文回应用户的具体表达，不要主动给情绪贴标签。"
     response = requests.post(
         os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/") + "/v1/chat/completions",
         json={
@@ -146,6 +151,23 @@ def delete_session(session_id):
         lock.release()
 
 
+@app.route('/api/messages/<int:message_id>/feedback', methods=['POST'])
+def emotion_feedback(message_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data,dict) or not valid_user_id(data.get('user_id')) or type(data.get('agreed')) is not bool:
+        return jsonify({'status':'error','msg':'反馈参数无效'}), 400
+    correction = data.get('correction')
+    if correction is not None and correction not in emotion_predictor.config['label_names'] + ['说不准']:
+        return jsonify({'status':'error','msg':'请选择有效的情绪参考'}), 400
+    if data['agreed'] and correction is not None:
+        return jsonify({'status':'error','msg':'确认符合时无需更正标签'}), 400
+    try:
+        result = conversation_store.save_feedback(message_id,data['user_id'],data['agreed'],correction)
+    except LookupError:
+        return jsonify({'status':'error','msg':'未找到可反馈的情绪参考'}), 404
+    return jsonify({'status':'success','feedback':result})
+
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.get_json(silent=True)
@@ -171,8 +193,10 @@ def chat():
     try:
         history = conversation_store.context(session_id, max_turns=8, char_budget=max(0, 2400 - len(user_text)))
         emotion_label, confidence = predict_emotion(user_text)
+        previous_user_texts, prior_turns = conversation_store.user_evidence(session_id)
+        emotion_reference = emotion_reference_policy.assess(previous_user_texts, user_text, prior_turns + 1)
         try:
-            reply = ask_ollama(user_text, emotion_label, history)
+            reply = ask_ollama(user_text, emotion_reference['label'], history)
         except (requests.RequestException, ValueError, KeyError, IndexError):
             app.logger.exception("Ollama 调用失败")
             return jsonify({"status": "error", "msg": "模型调用失败，请检查 Ollama 服务和模型是否就绪"}), 502
@@ -187,14 +211,14 @@ def chat():
                 finally:
                     conn.close()
             user_message_id, assistant_message_id = conversation_store.save_turn(
-                session_id, user_id, user_text, reply, emotion_label, confidence)
+                session_id, user_id, user_text, reply, emotion_label, confidence, emotion_reference)
         except (sqlite3.Error, pymysql.MySQLError, LookupError):
             app.logger.exception("聊天记录写入失败")
             return jsonify({"status": "error", "msg": "聊天记录保存失败，请检查数据库"}), 503
         return jsonify({"status": "success", "session_id": session_id,
                         "user_message_id": user_message_id, "assistant_message_id": assistant_message_id,
                         "context_turns": len(history) // 2, "emotion_label": emotion_label,
-                        "confidence": confidence, "reply": reply})
+                        "confidence": confidence, "emotion_reference": emotion_reference, "reply": reply})
     finally:
         lock.release()
 

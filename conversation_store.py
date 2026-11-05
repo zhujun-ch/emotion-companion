@@ -1,5 +1,6 @@
 """Persistent local conversations and bounded, complete-turn model context."""
 import sqlite3
+import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -26,7 +27,14 @@ class ConversationStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_session_user ON chat_session(user_id, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_chat_message_session ON chat_message(session_id, id);
+                CREATE TABLE IF NOT EXISTS emotion_feedback (
+                    message_id INTEGER PRIMARY KEY REFERENCES chat_message(id) ON DELETE CASCADE,
+                    agreed INTEGER NOT NULL, correction TEXT, updated_at TEXT NOT NULL
+                );
             """)
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(chat_message)')}
+            if 'emotion_reference' not in columns:
+                db.execute('ALTER TABLE chat_message ADD COLUMN emotion_reference TEXT')
             if save_emotion_records:
                 columns = {r['name'] for r in db.execute('PRAGMA table_info(emotion_record)')}
                 if 'session_id' not in columns:
@@ -70,7 +78,32 @@ class ConversationStore:
     def messages(self, session_id):
         with self.connect() as db:
             rows = db.execute('SELECT * FROM chat_message WHERE session_id=? ORDER BY id', (session_id,)).fetchall()
-        return [dict(r) for r in rows]
+            feedback = {r['message_id']:dict(r) for r in db.execute('''SELECT f.* FROM emotion_feedback f
+                JOIN chat_message m ON m.id=f.message_id WHERE m.session_id=?''',(session_id,))}
+        result = []
+        for r in rows:
+            item = dict(r)
+            item['emotion_reference'] = json.loads(item['emotion_reference']) if item['emotion_reference'] else None
+            item['feedback'] = feedback.get(item['id'])
+            result.append(item)
+        return result
+
+    def user_evidence(self, session_id):
+        with self.connect() as db:
+            rows = db.execute("SELECT content FROM chat_message WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT 4", (session_id,)).fetchall()
+            count = db.execute("SELECT COUNT(*) FROM chat_message WHERE session_id=? AND role='user'", (session_id,)).fetchone()[0]
+        return [r['content'] for r in reversed(rows)], count
+
+    def save_feedback(self, message_id, user_id, agreed, correction):
+        with self.connect() as db:
+            row = db.execute('''SELECT m.emotion_reference FROM chat_message m JOIN chat_session s ON s.id=m.session_id
+                WHERE m.id=? AND s.user_id=? AND m.role='assistant' ''', (message_id,user_id)).fetchone()
+            if not row or not row['emotion_reference'] or json.loads(row['emotion_reference']).get('state') != 'ready':
+                raise LookupError('No reference to correct')
+            db.execute('''INSERT INTO emotion_feedback(message_id,agreed,correction,updated_at) VALUES (?,?,?,?)
+                ON CONFLICT(message_id) DO UPDATE SET agreed=excluded.agreed,correction=excluded.correction,updated_at=excluded.updated_at''',
+                (message_id,int(agreed),correction,self.now()))
+        return {'agreed':agreed,'correction':correction}
 
     def context(self, session_id, max_turns=8, char_budget=2400):
         with self.connect() as db:
@@ -89,7 +122,7 @@ class ConversationStore:
             selected = pair + selected
         return selected
 
-    def save_turn(self, session_id, user_id, text, reply, emotion, confidence):
+    def save_turn(self, session_id, user_id, text, reply, emotion, confidence, emotion_reference=None):
         now = self.now()
         with self.connect() as db:
             row = db.execute('SELECT title FROM chat_session WHERE id=? AND user_id=?', (session_id, user_id)).fetchone()
@@ -98,8 +131,9 @@ class ConversationStore:
             count = db.execute('SELECT COUNT(*) FROM chat_message WHERE session_id=?', (session_id,)).fetchone()[0]
             user_message = db.execute('INSERT INTO chat_message(session_id,role,content,created_at) VALUES (?, ?, ?, ?)',
                                       (session_id, 'user', text, now))
-            assistant_message = db.execute('''INSERT INTO chat_message(session_id,role,content,emotion,confidence,created_at)
-                VALUES (?, ?, ?, ?, ?, ?)''', (session_id, 'assistant', reply, emotion, confidence, now))
+            assistant_message = db.execute('''INSERT INTO chat_message(session_id,role,content,emotion,confidence,created_at,emotion_reference)
+                VALUES (?, ?, ?, ?, ?, ?, ?)''', (session_id, 'assistant', reply, emotion, confidence, now,
+                json.dumps(emotion_reference,ensure_ascii=False) if emotion_reference is not None else None))
             title = text[:24] + ('…' if len(text) > 24 else '') if count == 0 else row['title']
             db.execute('UPDATE chat_session SET title=?,updated_at=? WHERE id=?', (title, now, session_id))
             if self.save_emotion_records:
