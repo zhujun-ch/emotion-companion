@@ -3,15 +3,13 @@ from flask_cors import CORS
 import pymysql
 import requests
 import torch
-import torch.nn as nn
-import jieba
-import pickle
 import os
 import sqlite3
 from pathlib import Path
 from dotenv import load_dotenv
 from conversation_store import ConversationStore
 from threading import Lock
+from emotion_model import EmotionPredictor
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -20,55 +18,16 @@ app = Flask(__name__)
 CORS(app)
 
 
-# ==========================================
-# 1. 定义 TextCNN 模型结构 (必须和训练时一模一样)
-# ==========================================
-class TextCNN(nn.Module):
-    def __init__(self, vocab_size, embed_dim, num_classes):
-        super(TextCNN, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.conv1 = nn.Conv2d(1, 100, (2, embed_dim))
-        self.conv2 = nn.Conv2d(1, 100, (3, embed_dim))
-        self.conv3 = nn.Conv2d(1, 100, (4, embed_dim))
-        self.dropout = nn.Dropout(0.5)
-        self.fc = nn.Linear(300, num_classes)
-
-    def forward(self, x):
-        x = self.embedding(x)
-        x = x.unsqueeze(1)
-        x1 = torch.relu(self.conv1(x)).squeeze(3)
-        x1 = torch.max_pool1d(x1, x1.size(2)).squeeze(2)
-        x2 = torch.relu(self.conv2(x)).squeeze(3)
-        x2 = torch.max_pool1d(x2, x2.size(2)).squeeze(2)
-        x3 = torch.relu(self.conv3(x)).squeeze(3)
-        x3 = torch.max_pool1d(x3, x3.size(2)).squeeze(2)
-        x = torch.cat((x1, x2, x3), 1)
-        x = self.dropout(x)
-        return self.fc(x)
-
-
-# ==========================================
-# 2. 启动时加载模型和词表 (全局加载，避免每次请求都加载导致卡顿)
-# ==========================================
-print("正在加载情绪识别模型...")
-with (BASE_DIR / "word2id.pkl").open("rb") as f:
-    word2id = pickle.load(f)
-device = torch.device("cpu")
-emotion_model = TextCNN(len(word2id), embed_dim=100, num_classes=5).to(device)
-emotion_model.load_state_dict(torch.load(BASE_DIR / "textcnn_model.pth", map_location=device, weights_only=True))
-emotion_model.eval()
-id2label = {0: "快乐", 1: "焦虑", 2: "悲伤", 3: "愤怒", 4: "压力大"}
-MAX_LEN = 20
+# Train/inference share the same vocabulary, tokenizer, model config, and label mapping.
+EMOTION_MODEL_DIR = BASE_DIR / os.getenv("EMOTION_MODEL_DIR", "artifacts/emotion_cnn")
+torch.set_num_threads(int(os.getenv("EMOTION_CPU_THREADS", "4")))
+print("正在加载训练后的六分类 TextCNN...")
+emotion_predictor = EmotionPredictor(EMOTION_MODEL_DIR)
+print("情绪模型加载完成：", ", ".join(emotion_predictor.config['label_names']))
 
 
 def predict_emotion(text):
-    seq = [word2id.get(word, 1) for word in jieba.cut(text)][:MAX_LEN]
-    seq += [0] * (MAX_LEN - len(seq))
-    tensor_x = torch.tensor([seq], dtype=torch.long, device=device)
-    with torch.no_grad():
-        probabilities = torch.softmax(emotion_model(tensor_x), dim=1)
-        confidence, predicted = torch.max(probabilities, 1)
-    return id2label[predicted.item()], confidence.item()
+    return emotion_predictor.predict(text)
 
 
 DB_BACKEND = os.getenv("DB_BACKEND", "mysql").lower()
@@ -111,24 +70,11 @@ conversation_locks = {}
 
 def ask_ollama(user_text, emotion_label, history=None):
     system_prompt = (
-        "你是一位温暖、耐心的倾听者，像朋友一样和用户聊天。\n"
-        "- 先回应用户刚才说的具体内容，不要复述情绪标签。\n"
-        "- 用口语、短句，一次回 2-4 句话，不要列清单、不要说教。\n"
-        "- 用户只想倾诉时就陪着聊，不主动给建议；只有用户问‘怎么办’时再给一个温和的建议。\n"
-        "- 倾诉时不要追问‘从中学到了什么’、要求总结收获或催促振作；避免空泛地说‘相信自己’、‘一切都会好’。\n"
-        "- 不做心理诊断，不用‘你这是抑郁/焦虑症’这类说法。\n"
-        "- 结合本次会话已有的聊天记录理解称呼、人物和事情，不要把其他会话的内容混进来；记录里没有的信息不要编造。\n"
-        "- 用户问你是否知道或记得姓名、宠物、经历等信息时，先核对当前会话记录；没有明确出现就坦诚说还不知道，绝对不要猜名字或虚构共同经历。\n"
-        "- 用户追问之前说过的原因、称呼或计划时，优先依据用户前面的原话回答，不要重新猜测原因或用通用安慰替代。\n"
-        f"内部参考：文本分类模型给出的情绪标签是‘{emotion_label}’，"
-        "仅供理解语境，不代表诊断，不要向用户复述。"
+        "你是一个温暖、有共情力的心理陪伴者。"
+        "用户正在向你倾诉，请用温和、支持性的语气回复，"
+        "不要给出医学诊断，不要评判用户。"
+        f"当前识别到的情绪倾向是：{emotion_label}。"
     )
-    if not history:
-        system_prompt += (
-            "\n当前没有可用的历史聊天记录。除非用户在当前这条消息里明确提供，"
-            "否则你不知道用户的姓名、宠物名或过去的安排。"
-            "被问到这些信息时，请直接说‘这段对话里你还没有告诉我’，不要假装记得。"
-        )
     response = requests.post(
         os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/") + "/v1/chat/completions",
         json={
@@ -150,7 +96,8 @@ def ask_ollama(user_text, emotion_label, history=None):
 
 @app.route('/api/ping', methods=['GET'])
 def ping():
-    return jsonify({"status": "success", "msg": "后端服务已启动！"})
+    return jsonify({"status": "success", "msg": "后端服务已启动！",
+                    "emotion_model": {"name": "TextCNN", "labels": emotion_predictor.config["label_names"]}})
 
 
 def valid_user_id(value):
