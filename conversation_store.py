@@ -88,9 +88,9 @@ class ConversationStore:
             result.append(item)
         return result
 
-    def user_evidence(self, session_id):
+    def user_evidence(self, session_id, limit=4):
         with self.connect() as db:
-            rows = db.execute("SELECT content FROM chat_message WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT 4", (session_id,)).fetchall()
+            rows = db.execute("SELECT content FROM chat_message WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT ?", (session_id,limit)).fetchall()
             count = db.execute("SELECT COUNT(*) FROM chat_message WHERE session_id=? AND role='user'", (session_id,)).fetchone()[0]
         return [r['content'] for r in reversed(rows)], count
 
@@ -98,7 +98,10 @@ class ConversationStore:
         with self.connect() as db:
             row = db.execute('''SELECT m.emotion_reference FROM chat_message m JOIN chat_session s ON s.id=m.session_id
                 WHERE m.id=? AND s.user_id=? AND m.role='assistant' ''', (message_id,user_id)).fetchone()
-            if not row or not row['emotion_reference'] or json.loads(row['emotion_reference']).get('state') != 'ready':
+            if not row or not row['emotion_reference']:
+                raise LookupError('No reference to correct')
+            reference = json.loads(row['emotion_reference'])
+            if reference.get('state') != 'ready' and not reference.get('candidates'):
                 raise LookupError('No reference to correct')
             db.execute('''INSERT INTO emotion_feedback(message_id,agreed,correction,updated_at) VALUES (?,?,?,?)
                 ON CONFLICT(message_id) DO UPDATE SET agreed=excluded.agreed,correction=excluded.correction,updated_at=excluded.updated_at''',

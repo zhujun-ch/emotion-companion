@@ -5,6 +5,7 @@ import requests
 import torch
 import os
 import sqlite3
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 from conversation_store import ConversationStore
@@ -134,8 +135,16 @@ def session_messages(session_id):
     session = conversation_store.get(session_id, user_id)
     if not session:
         return jsonify({"status": "error", "msg": "对话不存在"}), 404
-    return jsonify({"status": "success", "session": session,
-                    "messages": conversation_store.messages(session_id)})
+    messages = conversation_store.messages(session_id)
+    texts, count = conversation_store.user_evidence(session_id, limit=5)
+    if texts and messages and messages[-1]['role'] == 'assistant':
+        reference = emotion_reference_policy.assess(texts[:-1], texts[-1], count)
+        messages[-1]['emotion_reference'] = reference
+        # Update only the derived reference, keeping raw predictions and content intact.
+        with conversation_store.connect() as db:
+            db.execute('UPDATE chat_message SET emotion_reference=? WHERE id=?',
+                       (json.dumps(reference,ensure_ascii=False), messages[-1]['id']))
+    return jsonify({"status": "success", "session": session, "messages": messages})
 
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])

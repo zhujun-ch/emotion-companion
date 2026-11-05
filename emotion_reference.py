@@ -24,7 +24,7 @@ class EmotionReference:
                 self.calibration = data
 
     def assess(self, previous_user_texts, current_text, turn_count):
-        base = {'version':1, 'label':None, 'turn_count':turn_count, 'evidence_count':0,
+        base = {'version':2, 'label':None, 'candidates':[], 'turn_count':turn_count, 'evidence_count':0,
                 'state':'collecting', 'reason':'先聊聊，暂不判断情绪'}
         # The first three user messages are a warm-up, not a diagnostic questionnaire.
         if turn_count <= 3:
@@ -41,13 +41,15 @@ class EmotionReference:
         pooled = [sum(w*p[k] for w,p in zip(weights,probs))/sum(weights) for k in range(len(probs[0]))]
         candidate = max(range(len(pooled)), key=pooled.__getitem__)
         winners = [max(range(len(p)),key=p.__getitem__) for p in probs]
-        if winners[-1] != candidate or len(set(winners[-3:])) > 1:
-            return dict(base, state='changing', reason='近期表达有变化，暂不归为单一情绪')
+        candidates = [self.predictor.config['label_names'][k] for k in sorted(range(len(pooled)),key=pooled.__getitem__,reverse=True)[:2]]
+        base['candidates'] = candidates
+        if winners[-1] != candidate or winners[-3:].count(candidate) < 2:
+            return dict(base, state='changing', reason='已分析近期表达，但不同句子的判断不一致，以下仅为初步方向')
         threshold = self.calibration['thresholds'][candidate]
         if threshold is None:
-            return dict(base, state='uncertain', reason='这类表达暂时难以可靠判断')
+            return dict(base, state='uncertain', reason='已完成分析，这类表达的判断把握较低')
         strong = sum(w==candidate and p[candidate]>=threshold for w,p in zip(winners[-3:],probs[-3:]))
         if probs[-1][candidate] < threshold or strong < 2:
-            return dict(base, state='uncertain', reason='信息还不够明确，暂不判断')
+            return dict(base, state='uncertain', reason='已完成分析，判断把握较低，以下仅为初步方向')
         return dict(base, state='ready', label=self.predictor.config['label_names'][candidate],
                     reason='仅参考近期文字表达，不代表对你的确定判断')

@@ -41,6 +41,19 @@ class ReferenceTests(unittest.TestCase):
         p.calibration=None
         self.assertEqual(p.assess(['一','二','三'],'四',4)['state'],'uncertain')
 
+    def test_disagreement_still_exposes_uncertain_candidates(self):
+        p=policy({'一':distribution(2),'二':distribution(2),'三':distribution(3),'四':distribution(4)})
+        result=p.assess(['一','二','三'],'四',4)
+        self.assertEqual(len(result['candidates']),2)
+        self.assertIsNone(result['label'])
+        self.assertEqual(result['state'],'changing')
+
+    def test_two_recent_votes_can_support_reference(self):
+        p=policy({'一':distribution(4),'二':distribution(4),'三':distribution(2),'四':distribution(4)})
+        result=p.assess(['一','二','三'],'四',4)
+        self.assertEqual(result['state'],'ready')
+        self.assertEqual(result['label'],'悲伤')
+
     def test_feedback_snapshot_persistence_and_ownership(self):
         with tempfile.TemporaryDirectory() as d:
             store=ConversationStore(Path(d)/'db.sqlite3')
