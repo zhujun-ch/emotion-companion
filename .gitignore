@@ -42,3 +42,7 @@ exports/
 _qa/
 _build/
 
+# Local workspace and generated files
+/ollama/
+/frontend/
+/.local-workspace/
