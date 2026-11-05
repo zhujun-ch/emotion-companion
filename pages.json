@@ -1,17 +1,30 @@
 {
-	"pages": [ //pages数组中第一项表示应用启动页，参考：https://uniapp.dcloud.io/collocation/pages
-		{
-			"path": "pages/index/index",
-			"style": {
-				"navigationBarTitleText": "uni-app"
-			}
-		}
-	],
-	"globalStyle": {
-		"navigationBarTextStyle": "black",
-		"navigationBarTitleText": "uni-app",
-		"navigationBarBackgroundColor": "#F8F8F8",
-		"backgroundColor": "#F8F8F8"
-	},
-	"uniIdRouter": {}
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "心屿 · 心事倾诉"
+      }
+    },
+    {
+      "path": "pages/classic/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "心屿 · 经典版"
+      }
+    },
+    {
+      "path": "pages/file-preview/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "心屿 · 文件预览"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "心屿",
+    "backgroundColor": "#F7F8F3"
+  }
 }
