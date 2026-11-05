@@ -49,7 +49,7 @@
               <view v-if="message.role === 'ai'" class="avatar message-avatar">屿</view>
               <view class="message-body"><view class="speaker">{{ message.role === 'user' ? '你' : '心屿' }}</view>
                 <view class="bubble" :class="{ 'failed-bubble': message.failed }"><text selectable>{{ message.content }}</text></view>
-                <view v-if="message.role === 'ai'" class="message-tools"><text class="emotion-tag">情绪参考 · {{ message.emotion }}</text><button class="copy-button" @click="copyReply(message.content)">复制回复</button></view>
+                <view v-if="message.role === 'ai'" class="message-tools"><button class="copy-button" @click="copyReply(message.content)">复制回复</button></view>
                 <view v-if="message.failed" class="failed-label">未发送成功</view>
               </view>
             </view>
@@ -58,6 +58,20 @@
           <view id="chat-bottom" class="chat-bottom"></view>
         </scroll-view>
         <view class="composer-wrap">
+          <view v-if="latestReferenceMessage?.emotion_reference && !isLoading" class="reference-panel" :class="{ 'reference-ready': latestReferenceMessage.emotion_reference.state === 'ready' }">
+            <template v-if="latestReferenceMessage.emotion_reference.state === 'ready'">
+              <view class="reference-main">
+                <text v-if="latestReferenceMessage.feedback && !latestReferenceMessage.feedback.agreed">你的更正 · {{ latestReferenceMessage.feedback.correction || '暂不判断' }}</text>
+                <text v-else>近期表达可能偏向 · {{ latestReferenceMessage.emotion_reference.label }}</text>
+                <view class="reference-actions">
+                  <button :disabled="isFeedbackSaving" :class="{ chosen: latestReferenceMessage.feedback?.agreed }" @click="sendReferenceFeedback(latestReferenceMessage, true)">符合</button>
+                  <button :disabled="isFeedbackSaving" :class="{ chosen: latestReferenceMessage.feedback && !latestReferenceMessage.feedback.agreed }" @click="disagreeWithReference(latestReferenceMessage)">不太符合</button>
+                </view>
+              </view>
+              <view class="reference-note">{{ latestReferenceMessage.feedback ? '已保存你的反馈，你的感受由你来定义。' : '只是近期文字的参考，你的感受由你来定义。' }}</view>
+            </template>
+            <text v-else>{{ latestReferenceMessage.emotion_reference.reason }}</text>
+          </view>
           <view v-if="error" class="error-notice" role="alert"><text>{{ error }}</text><button :disabled="isLoading || isInitializing" @click="retry">重试</button></view>
           <view class="composer" :class="{ 'composer-busy': isLoading }">
             <textarea class="text-input" v-model="inputText" maxlength="2000" :disabled="isLoading || isInitializing" placeholder="从你想说的那句话开始…" :auto-height="true" :show-confirm-bar="false" @keydown="onComposerKeydown" />
@@ -74,7 +88,7 @@
 import { onMounted } from 'vue'
 import { useConversations } from '../../composables/useConversations'
 const { sessions, messages, inputText, isLoading, isInitializing, error, scrollTop, scrollAnchor,
-  activeSessionId, activeTitle, turnCount, initialize, selectSession, clearChat, sendMessage, retry,
+  activeSessionId, activeTitle, turnCount, latestReferenceMessage, isFeedbackSaving, sendReferenceFeedback, disagreeWithReference, initialize, selectSession, clearChat, sendMessage, retry,
   deleteSession, onComposerKeydown, copyReply, chooseMood, openHome } = useConversations()
 const prompts = ['今天有件小事想和你分享', '最近有些累，想说说心里话', '先陪我随便聊聊吧']
 function formatDate(value) {
@@ -85,6 +99,14 @@ onMounted(initialize)
 </script>
 
 <style scoped>
+.reference-panel { margin-bottom: 10px; padding: 8px 12px; color: #8a977f; background: #f5f7f0; border-radius: 8px; font-size: 11px; line-height: 1.7; }
+.reference-main { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px; }
+.reference-ready { border: 1px solid #e2e9d9; color: #70855e; }
+.reference-actions { display: flex; gap: 8px; }
+.workspace .reference-actions button { font-size: 10px; padding: 4px 9px; color: #8a987c; border: 1px solid #dce4d1; border-radius: 5px; }
+.workspace .reference-actions .chosen { color: #4e6e42; background: #e5edda; border-color: #acbf9c; }
+.reference-note { margin-top: 3px; font-size: 9px; color: #9aa68e; }
+
 .workspace { height: 100%; background: #f7f8f3; color: #34483c; font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
 .workspace, .workspace * { box-sizing: border-box; }
 .workspace { display: flex; height: 100vh; min-height: 460px; overflow: hidden; }

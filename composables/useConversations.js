@@ -19,6 +19,8 @@ const scrollTop = ref(0)
 const scrollAnchor = ref('')
 let initialization
 const activeTitle = computed(() => sessions.value.find(s => s.id === activeSessionId.value)?.title || '新的倾诉')
+const latestReferenceMessage = computed(() => messages.value.findLast(m => m.role === 'ai'))
+const isFeedbackSaving = ref(false)
 const turnCount = computed(() => messages.value.filter(m => m.role === 'ai' && !m.failed).length)
 
 function api(path, method = 'GET', data = {}) {
@@ -106,7 +108,7 @@ async function sendMessage() {
     const bubble = messages.value.find(m => m.id === userMessage.id)
     if (bubble) { bubble.pending = false; bubble.id = result.user_message_id }
     messages.value.push({ id: result.assistant_message_id, role: 'ai', content: result.reply,
-      emotion: result.emotion_label, confidence: result.confidence, created_at: new Date().toISOString() })
+      emotion: result.emotion_label, confidence: result.confidence, emotion_reference: result.emotion_reference, feedback: null, created_at: new Date().toISOString() })
     scrollToBottom()
     try { await refreshSessions() } catch (_) { /* The reply and record have already succeeded. */ }
   } catch (e) {
@@ -143,6 +145,21 @@ function deleteSession(id) {
     },
   })
 }
+async function sendReferenceFeedback(message, agreed, correction = null) {
+  if (isFeedbackSaving.value) return
+  isFeedbackSaving.value = true
+  try {
+    const result = await api(`/api/messages/${message.id}/feedback`, 'POST', { agreed, correction })
+    message.feedback = result.feedback
+    uni.showToast({ title: '反馈已保存，谢谢你告诉我', icon: 'none' })
+  } catch (e) { uni.showToast({ title: e.message, icon: 'none' }) }
+  finally { isFeedbackSaving.value = false }
+}
+function disagreeWithReference(message) {
+  if (isFeedbackSaving.value) return
+  const choices = ['愤怒', '恐惧', '快乐', '中性', '悲伤', '惊奇', '说不准']
+  uni.showActionSheet({ itemList: choices, success: result => sendReferenceFeedback(message, false, choices[result.tapIndex]) })
+}
 function onComposerKeydown(event) {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault()
@@ -156,6 +173,6 @@ function openConversation() { uni.navigateTo({ url: '/pages/conversation/index' 
 
 export function useConversations() {
   return { sessions, messages, inputText, isLoading, isInitializing, error, scrollTop, scrollAnchor,
-    activeSessionId, activeTitle, turnCount, initialize, selectSession, clearChat, sendMessage, retry,
+    activeSessionId, activeTitle, turnCount, latestReferenceMessage, isFeedbackSaving, sendReferenceFeedback, disagreeWithReference, initialize, selectSession, clearChat, sendMessage, retry,
     deleteSession, onComposerKeydown, copyReply, chooseMood, openHome, openConversation }
 }

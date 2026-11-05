@@ -116,9 +116,7 @@
                     <view class="companion-avatar">心</view>
                     <view class="assistant-body">
                       <view class="message-bubble">{{ msg.content }}</view>
-                      <view class="message-meta">
-                        <text class="emotion-badge">当前情绪：{{ msg.emotion }}</text>
-                      </view>
+
                     </view>
                   </view>
                 </view>
