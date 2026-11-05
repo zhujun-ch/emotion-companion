@@ -151,11 +151,11 @@ function onComposerKeydown(event) {
 }
 function copyReply(content) { uni.setClipboardData({ data: content }) }
 function chooseMood(text) { inputText.value = text }
-function openClassic() { uni.navigateTo({ url: '/pages/classic/index' }) }
-function openExtended() { uni.reLaunch({ url: '/pages/index/index' }) }
+function openHome() { uni.reLaunch({ url: '/pages/index/index' }) }
+function openConversation() { uni.navigateTo({ url: '/pages/conversation/index' }) }
 
 export function useConversations() {
   return { sessions, messages, inputText, isLoading, isInitializing, error, scrollTop, scrollAnchor,
     activeSessionId, activeTitle, turnCount, initialize, selectSession, clearChat, sendMessage, retry,
-    deleteSession, onComposerKeydown, copyReply, chooseMood, openClassic, openExtended }
+    deleteSession, onComposerKeydown, copyReply, chooseMood, openHome, openConversation }
 }
