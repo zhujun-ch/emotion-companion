@@ -27,6 +27,13 @@
         "navigationStyle": "custom",
         "navigationBarTitleText": "心屿 · 心事倾诉"
       }
+    },
+    {
+      "path": "pages/island/index",
+      "style": {
+        "navigationBarTitleText": "心屿 · 我的小岛",
+        "navigationStyle": "custom"
+      }
     }
   ],
   "globalStyle": {

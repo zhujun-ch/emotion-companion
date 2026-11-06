@@ -1,0 +1,285 @@
+<template>
+  <scroll-view scroll-y class="island-page">
+    <view class="island-layout">
+      <view class="island-top">
+        <button class="island-back" @click="goHome">‹ 首页</button>
+        <text class="island-brand">心屿 · {{ platform }}</text>
+      </view>
+      <view class="island-hero">
+        <text class="island-kicker">我的小岛 / {{ area.english }}</text>
+        <view class="island-title">{{ area.title }}</view>
+        <view class="island-subtitle">{{ area.description }}</view>
+      </view>
+      <view class="island-tabs">
+        <button v-for="(section, key) in areas" :key="key" :class="{ selected: mode === key }" :data-mode="key" @tap.stop="selectTab">
+          {{ section.title }}
+        </button>
+      </view>
+      <view v-if="error" class="island-error">{{ error }} <text @click="refresh">重新加载</text></view>
+      <view v-if="loading" class="island-empty">正在加载…</view>
+
+      <template v-if="mode === 'diary'">
+        <view class="island-card">
+          <view class="island-card-title">{{ editingId ? '编辑日记' : '记下今天的感受' }}</view>
+          <picker mode="date" :value="diary.day" @change="diary.day = $event.detail.value">
+            <view class="island-date">日期　{{ diary.day }}　⌄</view>
+          </picker>
+          <view class="island-chips">
+            <button v-for="mood in moods" :key="mood" :class="{ selected: diary.mood === mood }" @click="diary.mood = mood">{{ mood }}</button>
+          </view>
+          <textarea v-model="diary.body" class="island-textarea" maxlength="1000" placeholder="今天有什么想记下来的事？" />
+          <view class="island-actions">
+            <text>{{ diary.body.length }} / 1000</text>
+            <button v-if="editingId" @click="resetDiary">取消编辑</button>
+            <button class="island-primary" :disabled="busy || !diary.body.trim()" @click="saveDiary">保存日记</button>
+          </view>
+        </view>
+        <view class="island-list-title">我的日记 · {{ diaries.length }} 篇</view>
+        <view v-if="!diaries.length && !loading" class="island-empty">还没有日记。可以从一件小事开始。</view>
+        <view v-for="entry in diaries" :key="entry.id" class="island-card island-entry">
+          <view class="island-meta"><text class="island-tag">{{ entry.mood }}</text> {{ entry.day }}</view>
+          <view class="island-body">{{ entry.body }}</view>
+          <view class="island-actions">
+            <button @click="editDiary(entry)">编辑</button>
+            <button :disabled="busy" @click="deleteDiary(entry.id)">删除</button>
+          </view>
+        </view>
+      </template>
+
+      <template v-else-if="mode === 'board'">
+        <view class="island-card">
+          <view class="island-card-title">记录范围</view>
+          <view class="island-chips">
+            <button :class="{ selected: range === 7 }" @click="chooseRange(7)">近 7 天</button>
+            <button :class="{ selected: range === 30 }" @click="chooseRange(30)">近 30 天</button>
+          </view>
+          <view class="island-chips">
+            <picker mode="date" :value="start" @change="changeRange('start', $event.detail.value)"><view class="island-date">起始 {{ start }}</view></picker>
+            <picker mode="date" :value="end" @change="changeRange('end', $event.detail.value)"><view class="island-date">截止 {{ end }}</view></picker>
+          </view>
+        </view>
+        <view class="island-card">
+          <view class="island-card-title">心情分布 · {{ filtered.length }} 篇日记</view>
+          <view v-if="start > end" class="island-empty">起始日期应早于或等于截止日期。</view>
+          <view v-else-if="!filtered.length" class="island-empty">这段时间还没有日记。<text @click="selectMode('diary')">去写日记 ›</text></view>
+          <template v-else>
+            <view v-for="row in counts" :key="row.label" class="island-chart-row">
+              <text>{{ row.label }}</text><view class="island-track"><view class="island-bar" :style="{ width: row.percent + '%' }" /></view><text>{{ row.count }}</text>
+            </view>
+            <view class="island-list-title">按日记录数</view>
+            <view v-for="row in daily" :key="row.day" class="island-day"><text>{{ row.day }}</text><text>{{ row.count }} 篇</text></view>
+          </template>
+        </view>
+      </template>
+
+      <template v-else>
+        <view class="island-card">
+          <view class="island-card-title">写给树洞</view>
+          <view class="island-chips">
+            <button v-for="kind in kinds" :key="kind" :class="{ selected: post.kind === kind }" @click="post.kind = kind">{{ kind }}</button>
+          </view>
+          <textarea v-model="post.body" class="island-textarea" maxlength="500" placeholder="留一句鼓励，或者说说你此刻的心情。" />
+          <view class="island-actions">
+            <text>匿名展示 · {{ post.body.length }} / 500</text>
+            <button class="island-primary" :disabled="busy || !post.body.trim()" @click="submitPost">匿名提交</button>
+          </view>
+        </view>
+        <view class="island-chips island-feed-tabs">
+          <button :class="{ selected: !showMine }" @click="showMine = false">树洞留言</button>
+          <button :class="{ selected: showMine }" @click="showMine = true">我的投稿</button>
+          <button :disabled="loading" @click="refresh">刷新</button>
+        </view>
+        <view v-if="!visiblePosts.length && !loading" class="island-empty">这里暂时没有留言。</view>
+        <view v-for="item in visiblePosts" :key="item.id" class="island-card island-entry">
+          <view class="island-meta"><text class="island-tag">{{ item.kind }}</text> {{ showMine ? states[item.state] : '匿名留言' }} · {{ item.day }}</view>
+          <view class="island-body">{{ item.body }}</view>
+          <view v-if="showMine" class="island-actions">
+            <text>{{ item.reason }}</text>
+            <button v-if="['pending', 'published'].includes(item.state)" :disabled="busy" @click="withdraw(item.id)">撤回</button>
+          </view>
+        </view>
+      </template>
+    </view>
+  </scroll-view>
+</template>
+
+<script setup>
+import { computed, ref } from 'vue'
+import { onLoad, onShow } from '@dcloudio/uni-app'
+import { beijingDay, demoRequest } from '../../composables/demoPages'
+
+const areas = {
+  diary: { title: '心情日记', english: 'JOURNAL', description: '留一点时间，把今天的感受写下来。演示请使用虚构内容。' },
+  board: { title: '情绪看板', english: 'MOOD OVERVIEW', description: '看看自己记下了哪些感受。统计来自日记里的自填心情。' },
+  treehole: { title: '情绪树洞', english: 'TREE HOLE', description: '在这里匿名留下一段话。请勿填写联系方式或可识别身份的信息。' },
+}
+let platform = '网页客户端'
+// #ifdef MP-WEIXIN
+platform = '微信小程序'
+// #endif
+const moods = ['平静', '开心', '低落', '紧张', '生气', '惊喜']
+const kinds = ['鼓励', '倾诉']
+const states = { pending: '待人工审核', blocked: '未通过自动检查', published: '已发布', rejected: '已驳回', removed: '已下架', withdrawn: '已撤回' }
+const mode = ref('diary')
+const area = computed(() => areas[mode.value])
+const diaries = ref([])
+const posts = ref({ public: [], mine: [] })
+const showMine = ref(false)
+const visiblePosts = computed(() => showMine.value ? posts.value.mine : posts.value.public)
+const newDiary = () => ({ day: beijingDay(), mood: moods[0], body: '' })
+const diary = ref(newDiary())
+const editingId = ref(null)
+const post = ref({ kind: kinds[0], body: '' })
+const error = ref('')
+const loading = ref(false)
+const busy = ref(false)
+const range = ref(7)
+const start = ref(beijingDay(-6))
+const end = ref(beijingDay())
+const filtered = computed(() => diaries.value.filter(entry => entry.day >= start.value && entry.day <= end.value))
+const counts = computed(() => moods.map(label => {
+  const count = filtered.value.filter(entry => entry.mood === label).length
+  return { label, count, percent: filtered.value.length ? 100 * count / filtered.value.length : 0 }
+}))
+const daily = computed(() => [...new Set(filtered.value.map(entry => entry.day))].map(day => ({
+  day, count: filtered.value.filter(entry => entry.day === day).length,
+})))
+
+onLoad(options => {
+  const requested = options?.mode
+  mode.value = Object.prototype.hasOwnProperty.call(areas, requested) ? requested : 'diary'
+})
+onShow(refresh)
+
+async function refresh() {
+  const selected = mode.value
+  loading.value = true
+  error.value = ''
+  try {
+    if (selected === 'treehole') posts.value = await demoRequest('/posts')
+    else diaries.value = await demoRequest('/diaries')
+  } catch (failure) {
+    if (selected === mode.value) error.value = failure.message
+  } finally {
+    if (selected === mode.value) loading.value = false
+  }
+}
+function selectTab(event) {
+  selectMode(event.currentTarget.dataset.mode)
+}
+function selectMode(key) {
+  if (!Object.prototype.hasOwnProperty.call(areas, key) || mode.value === key || busy.value) return
+  mode.value = key
+  refresh()
+}
+function goHome() {
+  uni.reLaunch({ url: '/pages/index/index' })
+}
+function chooseRange(days) {
+  range.value = days
+  start.value = beijingDay(1 - days)
+  end.value = beijingDay()
+}
+function changeRange(field, value) {
+  range.value = 0
+  if (field === 'start') start.value = value
+  else end.value = value
+}
+function resetDiary() {
+  diary.value = newDiary()
+  editingId.value = null
+}
+function editDiary(entry) {
+  editingId.value = entry.id
+  diary.value = { day: entry.day, mood: entry.mood, body: entry.body }
+  uni.showToast({ title: '已载入上方编辑区', icon: 'none' })
+}
+async function mutate(action) {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    await action()
+    await refresh()
+  } catch (failure) {
+    error.value = failure.message
+    uni.showToast({ title: failure.message, icon: 'none' })
+  } finally {
+    busy.value = false
+  }
+}
+function saveDiary() {
+  return mutate(async () => {
+    const id = editingId.value
+    await demoRequest(id ? '/diaries/' + id : '/diaries', id ? 'PUT' : 'POST', diary.value)
+    resetDiary()
+    uni.showToast({ title: '日记已保存', icon: 'none' })
+  })
+}
+function deleteDiary(id) {
+  uni.showModal({
+    title: '删除日记', content: '删除后无法恢复。', success(result) {
+      if (!result.confirm) return
+      mutate(async () => {
+        await demoRequest('/diaries/' + id, 'DELETE')
+        if (editingId.value === id) resetDiary()
+      })
+    },
+  })
+}
+function submitPost() {
+  return mutate(async () => {
+    const result = await demoRequest('/posts', 'POST', post.value)
+    post.value.body = ''
+    showMine.value = true
+    uni.showToast({ title: states[result.state], icon: 'none' })
+  })
+}
+function withdraw(id) {
+  return mutate(() => demoRequest('/posts/' + id + '/withdraw', 'POST'))
+}
+</script>
+
+<style scoped>
+.island-page { height: 100vh; background: #f5f6ef; color: #263c31; font-family: system-ui, sans-serif; }
+.island-layout { max-width: 790px; padding: 24px 20px 52px; margin: auto; }
+.island-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.island-brand { color: #536957; font-size: 13px; }
+.island-hero { padding: 32px 26px; background: #e4edda; border-radius: 23px; }
+.island-kicker { color: #536b50; font-size: 11px; letter-spacing: 2px; }
+.island-title { margin: 10px 0 7px; font-size: 36px; font-weight: 700; letter-spacing: 2px; }
+.island-subtitle { color: #4d6250; font-size: 14px; line-height: 1.65; }
+.island-tabs, .island-chips, .island-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.island-tabs { margin: 18px 0; }
+.island-chips { margin: 12px 0; }
+.island-card { background: #fff; border: 1px solid #dfe7db; border-radius: 18px; padding: 19px; margin-bottom: 12px; }
+.island-card-title { font-size: 18px; font-weight: 700; margin-bottom: 10px; }
+.island-layout button { margin: 0; padding: 7px 13px; line-height: 1.5; font-size: 13px; color: #345642; background: #edf1e8; border-radius: 10px; cursor: pointer; }
+.island-layout button::after { border: none; }
+.island-layout .selected { background: #d5e5ce; color: #244832; font-weight: 700; }
+.island-layout .island-primary { background: #355f47; color: #fff; }
+.island-layout button[disabled] { opacity: .58; }
+.island-date { display: inline-block; padding: 8px 11px; background: #f0f3eb; border-radius: 8px; font-size: 13px; cursor: pointer; }
+.island-textarea { box-sizing: border-box; width: 100%; height: 104px; padding: 12px; border: 1px solid #dce5d7; border-radius: 10px; font-size: 15px; line-height: 1.6; }
+.island-actions { justify-content: flex-end; margin-top: 12px; color: #617366; font-size: 12px; }
+.island-actions text { margin-right: auto; }
+.island-list-title { margin: 19px 0 10px; font-weight: 700; }
+.island-meta { color: #546f5c; font-size: 12px; }
+.island-tag { display: inline-block; background: #eaf2e4; padding: 4px 8px; border-radius: 7px; margin-right: 4px; }
+.island-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 10px; font-size: 15px; line-height: 1.6; }
+.island-chart-row { display: grid; grid-template-columns: 36px 1fr 24px; align-items: center; gap: 10px; margin: 12px 0; font-size: 13px; }
+.island-track { background: #edf2e8; border-radius: 6px; height: 12px; overflow: hidden; }
+.island-bar { background: #719874; height: 100%; }
+.island-day { display: flex; justify-content: space-between; border-bottom: 1px solid #edf2e8; padding: 8px 0; font-size: 13px; }
+.island-error, .island-empty { background: #f4efe3; padding: 12px; border-radius: 10px; font-size: 14px; margin: 12px 0; }
+.island-error text, .island-empty text { text-decoration: underline; cursor: pointer; }
+@media (max-width: 600px) {
+  .island-layout { padding: 16px 14px 40px; }
+  .island-hero { padding: 23px 19px; }
+  .island-title { font-size: 29px; }
+  .island-card { padding: 15px; }
+}
+/* #ifdef MP-WEIXIN */
+.island-layout { padding-top: calc(var(--status-bar-height, 24px) + 50px); }
+/* #endif */
+</style>

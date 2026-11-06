@@ -1,6 +1,6 @@
 import { ref, computed, nextTick } from 'vue'
 
-const API = 'http://127.0.0.1:5000'
+const API = import.meta.env?.VITE_API_BASE || 'http://127.0.0.1:5000'
 const USER_KEY = 'xinyu-local-user'
 const SESSION_KEY = 'xinyu-active-session'
 let userId = uni.getStorageSync(USER_KEY)
@@ -19,7 +19,7 @@ const scrollTop = ref(0)
 const scrollAnchor = ref('')
 let initialization
 const activeTitle = computed(() => sessions.value.find(s => s.id === activeSessionId.value)?.title || '新的倾诉')
-const latestReferenceMessage = computed(() => messages.value.findLast(m => m.role === 'ai'))
+const latestReferenceMessage = computed(() => messages.value.slice().reverse().find(message => message.role === 'ai'))
 const isFeedbackSaving = ref(false)
 const turnCount = computed(() => messages.value.filter(m => m.role === 'ai' && !m.failed).length)
 
@@ -29,7 +29,17 @@ function api(path, method = 'GET', data = {}) {
       url: API + path, method, data: { ...data, user_id: userId }, timeout: 180000,
       success: res => res.statusCode >= 200 && res.statusCode < 300 && res.data.status === 'success'
         ? resolve(res.data) : reject(new Error(res.data?.msg || '请求失败，请稍后重试。')),
-      fail: () => reject(new Error('连接没有成功，请检查本地服务后重试。')),
+      fail: failure => {
+        const detail = failure?.errMsg || '网络请求失败'
+        // #ifdef MP-WEIXIN
+        console.warn('心屿聊天请求失败', method, path.split('?')[0], API, detail)
+        reject(new Error('无法连接聊天服务 ' + API + '（' + detail + '）'))
+        return
+        // #endif
+        // #ifndef MP-WEIXIN
+        reject(new Error('连接没有成功，请检查本地服务后重试。'))
+        // #endif
+      },
     })
   })
 }
@@ -46,12 +56,12 @@ async function scrollToBottom() {
   scrollTop.value += 100000
   scrollAnchor.value = 'chat-bottom'
 }
-async function loadSession(id) {
+async function loadSession(id, resetDraft = true) {
   const result = await api(`/api/sessions/${id}/messages`)
   rememberSession(id)
   messages.value = result.messages.map(m => ({ ...m, role: m.role === 'assistant' ? 'ai' : 'user' }))
   error.value = ''
-  inputText.value = ''
+  if (resetDraft) inputText.value = ''
   await scrollToBottom()
 }
 async function selectSession(id) {
@@ -83,7 +93,7 @@ async function initialize() {
     try {
       await refreshSessions()
       const selected = sessions.value.find(s => s.id === activeSessionId.value) || sessions.value[0]
-      if (selected) await loadSession(selected.id)
+      if (selected) await loadSession(selected.id, false)
       else rememberSession('')
     } catch (e) {
       error.value = e.message
@@ -95,14 +105,16 @@ async function initialize() {
 async function sendMessage() {
   const text = inputText.value.trim()
   if (!text || isLoading.value || isInitializing.value) return
+  inputText.value = ''
+  await sendText(text)
+}
+async function sendText(text) {
   isLoading.value = true
   error.value = ''
-  let userMessage
+  const userMessage = { id: `pending-${Date.now()}`, role: 'user', content: text, pending: true }
   try {
     if (!activeSessionId.value) await createSession()
-    userMessage = { id: `pending-${Date.now()}`, role: 'user', content: text, pending: true }
     messages.value.push(userMessage)
-    inputText.value = ''
     scrollToBottom()
     const result = await api('/api/chat', 'POST', { session_id: activeSessionId.value, text })
     const bubble = messages.value.find(m => m.id === userMessage.id)
@@ -113,17 +125,17 @@ async function sendMessage() {
     try { await refreshSessions() } catch (_) { /* The reply and record have already succeeded. */ }
   } catch (e) {
     error.value = e.message
-    const bubble = userMessage && messages.value.find(m => m.id === userMessage.id)
+    const bubble = messages.value.find(m => m.id === userMessage.id)
     if (bubble) { bubble.pending = false; bubble.failed = true }
+    else messages.value.push({ ...userMessage, pending: false, failed: true })
   } finally { isLoading.value = false; scrollToBottom() }
 }
 async function retry() {
   if (isLoading.value || isInitializing.value) return
-  const failed = messages.value.findLast(m => m.role === 'user' && m.failed)
+  const failed = messages.value.slice().reverse().find(m => m.role === 'user' && m.failed)
   if (!failed) { initialization = undefined; return initialize() }
-  inputText.value = failed.content
   messages.value = messages.value.filter(m => m.id !== failed.id)
-  await sendMessage()
+  await sendText(failed.content)
 }
 function deleteSession(id) {
   if (isLoading.value || isInitializing.value) return
@@ -161,7 +173,7 @@ function disagreeWithReference(message) {
   uni.showActionSheet({ itemList: choices, success: result => sendReferenceFeedback(message, false, choices[result.tapIndex]) })
 }
 function onComposerKeydown(event) {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+  if (!isLoading.value && !isInitializing.value && event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault()
     sendMessage()
   }
@@ -169,7 +181,10 @@ function onComposerKeydown(event) {
 function copyReply(content) { uni.setClipboardData({ data: content }) }
 function chooseMood(text) { inputText.value = text }
 function openHome() { uni.reLaunch({ url: '/pages/index/index' }) }
-function openConversation() { uni.navigateTo({ url: '/pages/conversation/index' }) }
+function openConversation(prefill = '') {
+  inputText.value = prefill
+  uni.navigateTo({ url: '/pages/conversation/index' })
+}
 
 export function useConversations() {
   return { sessions, messages, inputText, isLoading, isInitializing, error, scrollTop, scrollAnchor,

@@ -15,29 +15,33 @@
       <view class="nav-label">我的小岛 <text class="nav-en">MY LITTLE ISLAND</text></view>
 
       <view class="nav-list">
-        <view class="nav-item active">
+        <view class="nav-item active nav-link" @click="openConversation()">
           <text class="nav-icon">💬</text>
           <view>
             <view>心事倾诉</view>
             <view class="nav-item-en">A space to talk</view>
           </view>
         </view>
-        <view class="nav-item">
+        <navigator class="nav-item nav-link" url="/pages/island/index?mode=board">
           <text class="nav-icon">📊</text>
           <view>
             <view>情绪看板</view>
             <view class="nav-item-en">Meet your feelings</view>
           </view>
-        </view>
-        <view class="nav-item">
+        </navigator>
+        <navigator class="nav-item nav-link" url="/pages/island/index?mode=diary">
           <text class="nav-icon">📝</text>
           <view>
             <view>心情日记</view>
             <view class="nav-item-en">Little moments</view>
           </view>
-        </view>
+        </navigator>
       </view>
 
+      <navigator class="nav-item nav-link" url="/pages/island/index?mode=treehole">
+        <text class="nav-icon">🌿</text>
+        <view>情绪树洞<view class="nav-item-en">Tree hole</view></view>
+      </navigator>
       <view class="sidebar-note">
         <text class="spark">✳</text>
         <text class="note-text">慢慢来，\n你已经在向前了。</text>
@@ -55,6 +59,11 @@
       </view>
 
       <view class="page">
+        <view class="mobile-nav">
+          <navigator class="mobile-module" url="/pages/island/index?mode=diary">心情日记</navigator>
+          <navigator class="mobile-module" url="/pages/island/index?mode=board">情绪看板</navigator>
+          <navigator class="mobile-module" url="/pages/island/index?mode=treehole">情绪树洞</navigator>
+        </view>
         <!-- 欢迎语 -->
         <view class="page-heading">
           <view>
@@ -68,8 +77,7 @@
         <!-- 核心聊天卡片区 -->
         <view class="chat-layout">
           <!-- 聊天主体框 -->
-          <view class="chat-panel">
-            <button class="chat-entry-overlay" aria-label="打开聊天" @click="openConversation"></button>
+          <view class="chat-panel" @click="openConversation()">
             <view class="chat-panel-header">
               <view class="companion-heading">
                 <view class="companion-avatar">心</view>
@@ -96,7 +104,7 @@
 
                 <!-- 情绪圆球 -->
                 <view class="mood-selector">
-                  <view class="mood-item" v-for="m in moods" :key="m.name" @click="chooseMood(m.text)">
+                  <view class="mood-item" v-for="m in moods" :key="m.name" @click.stop="openWithMood(m.text)">
                     <view class="mood-face" :style="{ color: m.color, background: m.bg, borderColor: m.color }">{{ m.icon }}</view>
                     <text class="mood-name">{{ m.name }}</text>
                   </view>
@@ -126,26 +134,11 @@
 
             <!-- 底部输入区 -->
             <view class="composer-area">
-              <view v-if="error" class="classic-error" @click="retry">{{ error }} · 点击重试</view>
-              <view class="composer">
-                <textarea
-                  class="chat-textarea"
-                  v-model="inputText"
-                  placeholder="此刻的你，想说些什么？"
-                  :disabled="isLoading || isInitializing"
-                  maxlength="2000"
-                  @confirm="sendMessage"
-                />
-                <view class="composer-bottom">
-                  <view class="composer-tip">🛡 你的心事，值得被温柔对待</view>
-                  <view class="composer-actions">
-                    <text class="char-count">{{ inputText.length }}/2000</text>
-                    <button class="send-btn" :disabled="!inputText.trim() || isLoading || isInitializing" @click="sendMessage">
-                      ↑
-                    </button>
-                  </view>
-                </view>
-              </view>
+              <view v-if="error" class="classic-error" @click.stop="retry">{{ error }} · 点击重试</view>
+              <button class="chat-entry" @click.stop="openConversation()">
+                <text>此刻的你，想说些什么？</text>
+                <text class="entry-arrow">开始倾诉 ›</text>
+              </button>
             </view>
           </view>
 
@@ -178,9 +171,12 @@
 <script setup>
 import { onMounted } from 'vue'
 import { useConversations } from '../../composables/useConversations'
-const { inputText, messages, isLoading, isInitializing, error, scrollTop, chooseMood,
-  clearChat, sendMessage, initialize, openConversation, retry } = useConversations()
+const { messages, isLoading, isInitializing, error, scrollTop,
+  clearChat, initialize, openConversation, retry } = useConversations()
 onMounted(initialize)
+function openWithMood(text) {
+  openConversation(text)
+}
 async function startNewConversation() {
   if (isLoading.value || isInitializing.value) return
   await clearChat()
@@ -197,10 +193,12 @@ const moods = [
 </script>
 
 <style>
-.chat-panel { position: relative; }
-.chat-entry-overlay { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; padding: 0; margin: 0; background: transparent; border-radius: 13px; cursor: pointer; }
-.chat-entry-overlay::after { border: none; }
-.chat-entry-overlay:focus-visible { outline: 2px solid #829b6f; outline-offset: -3px; }
+.chat-panel { cursor: pointer; }
+.chat-entry { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; width: 100%; min-height: 58px; padding: 10px 14px; text-align: left; font-size: 13px; line-height: 1.5; background: #fafbf6; color: #596b50; border: 1px solid #e3e8d9; border-radius: 9px; }
+.chat-entry::after { border: none; }
+.chat-entry:focus-visible { outline: 2px solid #829b6f; }
+.chat-entry text:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry-arrow { flex-shrink: 0; color: #4b6847; font-weight: 600; }
 .new-chat-btn { margin: 0; line-height: normal; }
 .new-chat-btn::after { border: none; }
 
@@ -313,13 +311,6 @@ page {
 
 /* 底部输入框 */
 .composer-area { padding: 0 23px 16px; }
-.composer { padding: 14px 15px 10px; background: #fafbf6; border: 1px solid #e3e8d9; border-radius: 9px; }
-.chat-textarea { width: 100%; height: 55px; background: transparent; font-size: 12px; color: #596b50; line-height: 1.9; }
-.composer-bottom { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
-.composer-tip { color: #a5b097; font-size: 9px; }
-.composer-actions { display: flex; align-items: center; gap: 12px; }
-.char-count { font-size: 9px; color: #abb29f; }
-.send-btn { background: #6d8963; color: #fff; width: 31px; height: 31px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; padding: 0; }
 
 /* 右侧挂件 */
 .chat-aside { width: 258px; display: flex; flex-direction: column; gap: 17px; }
@@ -333,4 +324,18 @@ page {
 .breathing-card { text-align: center; }
 .breath-orbit { width: 104px; height: 104px; margin: 23px auto 17px; border: 1px solid #e9ecde; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
 .breath-circle { width: 67px; height: 67px; border-radius: 50%; background: radial-gradient(circle, #e5ecd8, #eaf0e1); display: flex; flex-direction: column; align-items: center; justify-content: center; color: #9aab83; }
+.nav-link { cursor: pointer; }
+.nav-link:hover { background: #e0e8d8; }
+.mobile-nav { display: none; }
+@media (max-width: 760px) {
+  .sidebar, .chat-aside { display: none; }
+  .topbar { height: 52px; padding: 0 16px; }
+  .page { padding: 14px; overflow: auto; }
+  .page-heading { flex-wrap: wrap; gap: 10px; }
+  .mobile-nav { display: flex; gap: 8px; margin: 0 0 16px; }
+  .mobile-module { flex: 1 1 0; min-width: 0; text-align: center; padding: 8px 0; font-size: 13px; line-height: 1.5; background: #e4edda; color: #345642; }
+}
+/* #ifdef MP-WEIXIN */
+.app-shell { box-sizing: border-box; padding-top: calc(var(--status-bar-height, 24px) + 44px); }
+/* #endif */
 </style>
