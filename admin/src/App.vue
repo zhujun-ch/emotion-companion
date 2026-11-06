@@ -27,12 +27,13 @@
           </div>
           <div class="queue-heading"><h2>投稿列表</h2><button :disabled="busy" @click="refresh">刷新队列</button></div>
           <p v-if="!visible.length" class="panel empty">当前没有稿件。</p>
-          <article v-for="item in visible" :key="item.id" class="panel post">
-            <div class="meta"><span class="tag">{{ item.kind }}</span><span>#{{ item.id }} · {{ item.day }}</span><strong>{{ labels[item.state] }}</strong></div>
+          <article v-for="item in visible" :key="item.targetType + '-' + item.id" class="panel post">
+            <div class="meta"><span class="tag">{{ item.targetType === 'comment' ? '回复' : item.kind }}</span><span>#{{ item.id }} · {{ item.day }}</span><strong>{{ labels[item.state] }}</strong></div>
+            <p v-if="item.targetType === 'comment'" class="reason">回复树洞 #{{ item.post_id }}：{{ item.post_body }}</p>
             <p class="body">{{ item.body }}</p>
             <p class="reason">{{ item.reason }}</p>
             <div v-if="item.state === 'pending'" class="actions">
-              <input v-model="reasons[item.id]" maxlength="120" :aria-label="'稿件 ' + item.id + ' 的驳回原因'" placeholder="驳回原因（通过时可留空）">
+              <input v-model="reasons[item.targetType + '-' + item.id]" maxlength="120" :aria-label="'稿件 ' + item.id + ' 的驳回原因'" placeholder="驳回原因（通过时可留空）">
               <button class="danger" :disabled="busy" @click="review(item, 'reject')">驳回</button>
               <button class="primary" :disabled="busy" @click="review(item, 'approve')">通过并发布</button>
             </div>
@@ -84,12 +85,19 @@ async function run(action) {
   catch (failure) { error.value = failure instanceof TypeError ? '无法连接演示后端' : failure.message }
   finally { busy.value = false }
 }
+async function loadQueue() {
+  const [allPosts, comments] = await Promise.all([request('/posts'), request('/comments')])
+  posts.value = [
+    ...allPosts.map(item => ({ ...item, targetType: 'post' })),
+    ...comments.map(item => ({ ...item, targetType: 'comment' })),
+  ]
+}
 function login() {
   return run(async () => {
     const data = await request('/login', { username: username.value, password: password.value })
     token.value = data.token
     password.value = ''
-    posts.value = await request('/posts')
+    await loadQueue()
   })
 }
 function logout() {
@@ -102,7 +110,7 @@ function logout() {
   })
 }
 function refresh() {
-  return run(async () => { posts.value = await request('/posts') })
+  return run(loadQueue)
 }
 function select(tab) {
   selected.value = tab
@@ -111,9 +119,11 @@ function select(tab) {
 function review(item, action) {
   if (action === 'remove' && !window.confirm('将这条留言从树洞下架？')) return
   return run(async () => {
-    await request('/posts/' + item.id, { action, reason: action === 'reject' ? reasons.value[item.id] || '' : '' })
-    delete reasons.value[item.id]
-    posts.value = await request('/posts')
+    const key = item.targetType + '-' + item.id
+    await request('/' + (item.targetType === 'comment' ? 'comments' : 'posts') + '/' + item.id,
+      { action, reason: action === 'reject' ? reasons.value[key] || '' : '' })
+    delete reasons.value[key]
+    await loadQueue()
   })
 }
 </script>

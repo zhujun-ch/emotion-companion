@@ -47,6 +47,17 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
                 action TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS post_comment (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL,
+                body TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL,
+                day TEXT NOT NULL, author TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_post_comment_post ON post_comment(post_id, state, id);
+            CREATE TABLE IF NOT EXISTS comment_audit (
+                id INTEGER PRIMARY KEY, comment_id INTEGER NOT NULL, post_id INTEGER NOT NULL,
+                actor TEXT NOT NULL, action TEXT NOT NULL, state TEXT NOT NULL,
+                reason TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         columns = {row['name'] for row in db.execute('PRAGMA table_info(post)')}
         if 'author' not in columns:
@@ -143,6 +154,10 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
         db.execute('INSERT INTO post_audit(post_id, actor, action, state, reason) VALUES (?, ?, ?, ?, ?)',
                    (post_id, actor, action, state, reason))
 
+    def audit_comment(db, comment_id, post_id, actor, action, state, reason):
+        db.execute('''INSERT INTO comment_audit(comment_id, post_id, actor, action, state, reason)
+                      VALUES (?, ?, ?, ?, ?, ?)''', (comment_id, post_id, actor, action, state, reason))
+
     @pages.post('/posts/session')
     def start_post_session():
         token = token_urlsafe(32)
@@ -154,11 +169,25 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
     def list_posts():
         with database() as db:
             author = author_for(db)
-            public = db.execute('''SELECT id, kind, body, day FROM post
-                                   WHERE state = 'published' ORDER BY id DESC''')
+            public = [dict(row) for row in db.execute('''SELECT id, kind, body, day FROM post
+                                                        WHERE state = 'published' ORDER BY id DESC''')]
+            comments = db.execute('''SELECT c.id, c.post_id, c.body, c.day FROM post_comment c
+                                     JOIN post p ON p.id = c.post_id
+                                     WHERE c.state = 'published' AND p.state = 'published'
+                                     ORDER BY c.id''')
+            grouped = {item['id']: [] for item in public}
+            for row in comments:
+                grouped[row['post_id']].append(dict(row))
+            for item in public:
+                item['comments'] = grouped[item['id']]
             mine = db.execute('''SELECT id, kind, body, state, reason, day FROM post
                                  WHERE author = ? ORDER BY id DESC''', (author,))
-            return jsonify(public=[dict(row) for row in public], mine=[dict(row) for row in mine])
+            mine_comments = db.execute('''SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day,
+                                                 p.body AS post_body FROM post_comment c
+                                          JOIN post p ON p.id = c.post_id
+                                          WHERE c.author = ? ORDER BY c.id DESC''', (author,))
+            return jsonify(public=public, mine=[dict(row) for row in mine],
+                           mine_comments=[dict(row) for row in mine_comments])
 
     @pages.post('/posts')
     def submit_post():
@@ -177,6 +206,38 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
             ).lastrowid
             audit(db, item_id, '系统', 'auto', state, reason)
         return jsonify(id=item_id, state=state, reason=reason)
+
+    @pages.post('/posts/<int:item_id>/comments')
+    def submit_comment(item_id):
+        body = body_text(payload(), 300)
+        with database() as db:
+            author = require_author(db)
+            if not db.execute("SELECT 1 FROM post WHERE id = ? AND state = 'published'", (item_id,)).fetchone():
+                abort(404, '这条树洞留言已不可回复')
+        state, reason = moderate_post(body)
+        with database() as db:
+            if not db.execute("SELECT 1 FROM post WHERE id = ? AND state = 'published'", (item_id,)).fetchone():
+                abort(409, '原留言状态已变化，请刷新')
+            comment_id = db.execute('''INSERT INTO post_comment(post_id, body, state, reason, day, author)
+                                       VALUES (?, ?, ?, ?, ?, ?)''',
+                                    (item_id, body, state, reason, date.today().isoformat(), author)).lastrowid
+            audit_comment(db, comment_id, item_id, '系统', 'auto', state, reason)
+        return jsonify(id=comment_id, state=state, reason=reason)
+
+    @pages.post('/comments/<int:comment_id>/withdraw')
+    def withdraw_comment(comment_id):
+        with database() as db:
+            author = require_author(db)
+            row = db.execute('SELECT post_id FROM post_comment WHERE id = ? AND author = ?',
+                             (comment_id, author)).fetchone()
+            if row is None:
+                abort(404, '回复不存在')
+            if not db.execute('''UPDATE post_comment SET state = 'withdrawn', reason = '作者撤回'
+                                 WHERE id = ? AND author = ? AND state IN ('pending', 'published')''',
+                              (comment_id, author)).rowcount:
+                abort(409, '回复状态已变化，请刷新')
+            audit_comment(db, comment_id, row['post_id'], '作者', 'withdraw', 'withdrawn', '作者撤回')
+        return jsonify(ok=True)
 
     @pages.post('/posts/<int:item_id>/withdraw')
     def withdraw(item_id):
@@ -235,8 +296,13 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
     def review_history():
         with database() as db:
             require_reviewer(db)
-            return jsonify([dict(row) for row in db.execute(
-                'SELECT * FROM post_audit ORDER BY id DESC LIMIT 100')])
+            return jsonify([dict(row) for row in db.execute('''
+                SELECT id, post_id, NULL AS comment_id, 'post' AS target_type,
+                       actor, action, state, reason, created_at FROM post_audit
+                UNION ALL
+                SELECT id, post_id, comment_id, 'comment' AS target_type,
+                       actor, action, state, reason, created_at FROM comment_audit
+                ORDER BY created_at DESC, id DESC LIMIT 100''')])
 
     @pages.get('/review/posts')
     def review_posts():
@@ -244,6 +310,46 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
             require_reviewer(db)
             return jsonify([dict(row) for row in db.execute(
                 'SELECT id, kind, body, state, reason, day FROM post ORDER BY id DESC')])
+
+    @pages.get('/review/comments')
+    def review_comments():
+        with database() as db:
+            require_reviewer(db)
+            return jsonify([dict(row) for row in db.execute('''
+                SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day,
+                       p.body AS post_body FROM post_comment c
+                JOIN post p ON p.id = c.post_id ORDER BY c.id DESC''')])
+
+    @pages.post('/review/comments/<int:comment_id>')
+    def review_comment(comment_id):
+        with database() as db:
+            require_reviewer(db)
+            data = payload()
+            transition = {
+                'approve': ('pending', 'published', '人工审核通过'),
+                'reject': ('pending', 'rejected', '人工审核驳回'),
+                'remove': ('published', 'removed', '管理员下架'),
+            }.get(str(data.get('action')))
+            if transition is None:
+                abort(400, '未知审核操作')
+            previous, state, default_reason = transition
+            reason = data.get('reason', '')
+            if not isinstance(reason, str) or len(reason.strip()) > 120:
+                abort(400, '审核原因最多 120 字')
+            if state == 'rejected' and not reason.strip():
+                abort(400, '请填写驳回原因')
+            reason = reason.strip() or default_reason
+            row = db.execute('SELECT post_id FROM post_comment WHERE id = ?', (comment_id,)).fetchone()
+            if row is None:
+                abort(404, '回复不存在')
+            if state == 'published' and not db.execute(
+                    "SELECT 1 FROM post WHERE id = ? AND state = 'published'", (row['post_id'],)).fetchone():
+                abort(409, '原留言已下架，无法发布回复')
+            if not db.execute('UPDATE post_comment SET state = ?, reason = ? WHERE id = ? AND state = ?',
+                              (state, reason, comment_id, previous)).rowcount:
+                abort(409, '回复状态已变化，请刷新')
+            audit_comment(db, comment_id, row['post_id'], reviewer_username, data['action'], state, reason)
+        return jsonify(ok=True)
 
     @pages.post('/review/posts/<int:item_id>')
     def review(item_id):

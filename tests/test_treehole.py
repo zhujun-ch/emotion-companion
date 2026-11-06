@@ -79,6 +79,63 @@ class TreeholeTests(unittest.TestCase):
         history = self.client.get('/api/demo/review/history', headers=reviewer).json
         self.assertEqual(history[0]['post_id'], item_id)
 
+    def test_comments_follow_moderation_and_only_published_are_public(self):
+        post_id = self.post('鼓励测试')
+        url = f'/api/demo/posts/{post_id}/comments'
+        approved = self.client.post(url, json={'body': '鼓励测试'}, headers=self.other)
+        pending = self.client.post(url, json={'body': '需要复核'}, headers=self.other)
+        self.assertEqual((approved.json['state'], pending.json['state']), ('published', 'pending'))
+        public = next(row for row in self.lists(self.author)['public'] if row['id'] == post_id)
+        self.assertEqual([row['id'] for row in public['comments']], [approved.json['id']])
+        self.assertEqual(len(self.lists(self.author)['mine_comments']), 0)
+        self.assertEqual(len(self.lists(self.other)['mine_comments']), 2)
+        self.assertEqual(self.client.post(url, json={'body': '测试'}).status_code, 401)
+        self.assertEqual(self.client.post(url, json={'body': ' '}, headers=self.other).status_code, 400)
+        self.assertEqual(self.client.post('/api/demo/posts/9999/comments', json={'body': '鼓励测试'},
+                                          headers=self.other).status_code, 404)
+
+        comment_id = pending.json['id']
+        review_url = f'/api/demo/review/comments/{comment_id}'
+        self.assertEqual(self.client.post(review_url, json={'action': 'approve'}, headers=self.other).status_code, 403)
+        login = self.client.post('/api/demo/review/login', json={'username': 'admin', 'password': 'test-password'})
+        reviewer = {'Authorization': 'Bearer ' + login.json['token']}
+        self.assertEqual(self.client.post(review_url, json={'action': 'approve'}, headers=reviewer).status_code, 200)
+        self.assertEqual(len(next(row for row in self.lists(self.author)['public'] if row['id'] == post_id)['comments']), 2)
+        self.assertEqual(self.client.post(f'/api/demo/comments/{comment_id}/withdraw', headers=self.author).status_code, 404)
+        self.assertEqual(self.client.post(f'/api/demo/comments/{comment_id}/withdraw', headers=self.other).status_code, 200)
+        self.assertEqual(len(next(row for row in self.lists(self.author)['public'] if row['id'] == post_id)['comments']), 1)
+        history = self.client.get('/api/demo/review/history', headers=reviewer).json
+        self.assertTrue(any(row['target_type'] == 'comment' and row['comment_id'] == comment_id
+                            and row['action'] == 'withdraw' for row in history))
+
+        self.client = self.open_database()
+        self.assertEqual(self.lists(self.other)['mine_comments'][0]['state'], 'withdrawn')
+        self.assertEqual(self.client.post(f'/api/demo/review/posts/{post_id}',
+                                          json={'action': 'remove'}, headers=reviewer).status_code, 200)
+        self.assertNotIn(post_id, [row['id'] for row in self.lists(self.author)['public']])
+        self.assertEqual(self.client.post(url, json={'body': '鼓励测试'}, headers=self.other).status_code, 404)
+
+    def test_reviewer_can_reject_or_remove_replies_without_affecting_parent(self):
+        post_id = self.post('鼓励测试')
+        url = f'/api/demo/posts/{post_id}/comments'
+        pending_id = self.client.post(url, json={'body': '需要复核'}, headers=self.other).json['id']
+        public_id = self.client.post(url, json={'body': '鼓励测试'}, headers=self.other).json['id']
+        login = self.client.post('/api/demo/review/login', json={'username': 'admin', 'password': 'test-password'})
+        reviewer = {'Authorization': 'Bearer ' + login.json['token']}
+        comments = self.client.get('/api/demo/review/comments', headers=reviewer).json
+        self.assertEqual({row['id'] for row in comments}, {pending_id, public_id})
+        self.assertEqual(self.client.post(f'/api/demo/review/comments/{pending_id}',
+                                          json={'action': 'reject'}, headers=reviewer).status_code, 400)
+        self.assertEqual(self.client.post(f'/api/demo/review/comments/{pending_id}',
+                                          json={'action': 'reject', 'reason': '测试原因'},
+                                          headers=reviewer).status_code, 200)
+        self.assertEqual(self.client.post(f'/api/demo/review/comments/{public_id}',
+                                          json={'action': 'remove'}, headers=reviewer).status_code, 200)
+        parent = next(row for row in self.lists(self.author)['public'] if row['id'] == post_id)
+        self.assertEqual(parent['comments'], [])
+        self.assertEqual({row['state'] for row in self.lists(self.other)['mine_comments']},
+                         {'removed', 'rejected'})
+
     @patch('treehole_moderation.requests.post')
     def test_rule_blocks_without_model_and_timeout_requires_review(self, request):
         self.assertEqual(moderate_treehole('访问 https://example.test', 'http://local', 'qwen')[0], 'blocked')
