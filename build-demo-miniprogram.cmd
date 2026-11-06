@@ -1,5 +1,9 @@
 @echo off
 setlocal
+if /i "%~1"=="lan" if not defined VITE_API_BASE (
+    call :detectLanApi
+    if errorlevel 1 exit /b 1
+)
 cd /d "%~dp0frontend"
 set "UNI_INPUT_DIR=%CD%"
 if not defined HX_APP_ROOT set "HX_APP_ROOT=F:\HBuilderX"
@@ -17,3 +21,16 @@ if exist "%XINYU_PROJECT_CONFIG%" (
     if errorlevel 1 exit /b 1
 )
 echo WeChat demo build: %UNI_OUTPUT_DIR%
+if defined VITE_API_BASE echo API: %VITE_API_BASE%
+exit /b 0
+
+:detectLanApi
+set "XINYU_LAN_IP="
+for /f "delims=" %%I in ('powershell.exe -NoProfile -Command "$addresses = @(foreach ($adapter in Get-NetIPConfiguration) { if ($adapter.NetAdapter.HardwareInterface -and $adapter.IPv4DefaultGateway) { foreach ($ip in $adapter.IPv4Address) { $ip.IPAddress } } }); if ($addresses.Count -eq 1) { $addresses[0] }"') do set "XINYU_LAN_IP=%%I"
+if not defined XINYU_LAN_IP (
+    echo Could not choose one LAN IPv4 address. Set VITE_API_BASE to the backend URL and try again.
+    exit /b 1
+)
+if not defined APP_PORT set "APP_PORT=5000"
+set "VITE_API_BASE=http://%XINYU_LAN_IP%:%APP_PORT%"
+exit /b 0
