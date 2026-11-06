@@ -1,24 +1,44 @@
 {
-	"easycom": {
-		"autoscan": true,
-		"custom": {
-			"^qiun-data-charts": "uni_modules/qiun-data-charts/components/qiun-data-charts/qiun-data-charts.vue"
-		}
-	},
-	"pages": [
-		{
-			"path": "pages/index/index",
-			"style": {
-				"navigationBarTitleText": "uni-app"
-			}
-		}
-	],
-	"globalStyle": {
-		"navigationBarTextStyle": "black",
-		"navigationBarTitleText": "uni-app",
-		"navigationBarBackgroundColor": "#F8F8F8",
-		"backgroundColor": "#F8F8F8",
-		"navigationStyle": "custom"
-	},
-	"uniIdRouter": {}
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "心屿 · 主页"
+      }
+    },
+    {
+      "path": "pages/classic/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "心屿 · 主页"
+      }
+    },
+    {
+      "path": "pages/file-preview/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "心屿 · 文件预览"
+      }
+    },
+    {
+      "path": "pages/conversation/index",
+      "style": {
+        "navigationStyle": "custom",
+        "navigationBarTitleText": "心屿 · 心事倾诉"
+      }
+    },
+    {
+      "path": "pages/island/index",
+      "style": {
+        "navigationBarTitleText": "心屿 · 我的小岛",
+        "navigationStyle": "custom"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "心屿",
+    "backgroundColor": "#F7F8F3"
+  }
 }
