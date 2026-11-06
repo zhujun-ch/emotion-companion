@@ -1,8 +1,10 @@
 """Shared fixture data and interactions for the local three-front-end demo."""
 from contextlib import contextmanager
 from datetime import date, timedelta
+from hashlib import sha256
+from hmac import digest
 from secrets import compare_digest, token_urlsafe
-import re
+from time import time
 import sqlite3
 
 from flask import Blueprint, abort, jsonify, request
@@ -11,9 +13,8 @@ MOODS = ('平静', '开心', '低落', '紧张', '生气', '惊喜')
 KINDS = ('鼓励', '倾诉')
 
 
-def create_demo_pages(path, reviewer_password):
+def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_username='admin'):
     pages = Blueprint('demo_pages', __name__, url_prefix='/api/demo')
-    reviewer_token = token_urlsafe(32)
 
     @contextmanager
     def database():
@@ -37,7 +38,19 @@ def create_demo_pages(path, reviewer_password):
                 day TEXT NOT NULL, mine INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS demo_seed (id INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS post_author (token_hash TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS reviewer_session (
+                token_hash TEXT PRIMARY KEY, expires_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS post_audit (
+                id INTEGER PRIMARY KEY, post_id INTEGER NOT NULL, actor TEXT NOT NULL,
+                action TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
         """)
+        columns = {row['name'] for row in db.execute('PRAGMA table_info(post)')}
+        if 'author' not in columns:
+            db.execute('ALTER TABLE post ADD COLUMN author TEXT')
         if db.execute('INSERT OR IGNORE INTO demo_seed VALUES (1)').rowcount:
             today = date.today()
             db.executemany('INSERT INTO diary(day, mood, body) VALUES (?, ?, ?)', [
@@ -55,6 +68,7 @@ def create_demo_pages(path, reviewer_password):
 
     @pages.errorhandler(400)
     @pages.errorhandler(401)
+    @pages.errorhandler(403)
     @pages.errorhandler(404)
     @pages.errorhandler(409)
     def handle_error(error):
@@ -103,13 +117,47 @@ def create_demo_pages(path, reviewer_password):
                 abort(404, '日记已不存在')
         return jsonify(ok=True)
 
+    def hash_token(token):
+        return sha256(token.encode()).hexdigest()
+
+    def hash_reviewer_token(token):
+        identity = f'{reviewer_username}:{token}'.encode()
+        return digest(reviewer_password.encode(), identity, 'sha256').hex()
+
+    def author_for(db):
+        token = request.headers.get('X-Treehole-Token', '')
+        if not token:
+            return None
+        digest = hash_token(token)
+        if not db.execute('SELECT 1 FROM post_author WHERE token_hash = ?', (digest,)).fetchone():
+            abort(401, '投稿会话已失效，请刷新后重试')
+        return digest
+
+    def require_author(db):
+        author = author_for(db)
+        if not author:
+            abort(401, '请先建立投稿会话')
+        return author
+
+    def audit(db, post_id, actor, action, state, reason):
+        db.execute('INSERT INTO post_audit(post_id, actor, action, state, reason) VALUES (?, ?, ?, ?, ?)',
+                   (post_id, actor, action, state, reason))
+
+    @pages.post('/posts/session')
+    def start_post_session():
+        token = token_urlsafe(32)
+        with database() as db:
+            db.execute('INSERT INTO post_author VALUES (?)', (hash_token(token),))
+        return jsonify(token=token)
+
     @pages.get('/posts')
     def list_posts():
         with database() as db:
-            public = db.execute("""SELECT id, kind, body, day FROM post
-                                   WHERE state = 'published' ORDER BY id DESC""")
-            mine = db.execute("""SELECT id, kind, body, state, reason, day FROM post
-                                 WHERE mine = 1 ORDER BY id DESC""")
+            author = author_for(db)
+            public = db.execute('''SELECT id, kind, body, day FROM post
+                                   WHERE state = 'published' ORDER BY id DESC''')
+            mine = db.execute('''SELECT id, kind, body, state, reason, day FROM post
+                                 WHERE author = ? ORDER BY id DESC''', (author,))
             return jsonify(public=[dict(row) for row in public], mine=[dict(row) for row in mine])
 
     @pages.post('/posts')
@@ -119,66 +167,107 @@ def create_demo_pages(path, reviewer_password):
         if kind not in KINDS:
             abort(400, '请选择投稿类型')
         body = body_text(data, 500)
-        if re.search(r'https?://|1[3-9][0-9]{9}', body, re.IGNORECASE):
-            state, reason = 'blocked', '检测到链接或联系方式'
-        else:
-            state, reason = 'pending', '演示审核队列'
         with database() as db:
-            db.execute('INSERT INTO post(kind, body, state, reason, day, mine) VALUES (?, ?, ?, ?, ?, 1)',
-                       (kind, body, state, reason, date.today().isoformat()))
-        return jsonify(state=state, reason=reason)
+            author = require_author(db)
+        state, reason = moderate_post(body)
+        with database() as db:
+            item_id = db.execute(
+                'INSERT INTO post(kind, body, state, reason, day, mine, author) VALUES (?, ?, ?, ?, ?, 1, ?)',
+                (kind, body, state, reason, date.today().isoformat(), author),
+            ).lastrowid
+            audit(db, item_id, '系统', 'auto', state, reason)
+        return jsonify(id=item_id, state=state, reason=reason)
 
     @pages.post('/posts/<int:item_id>/withdraw')
     def withdraw(item_id):
         with database() as db:
-            if not db.execute("""UPDATE post SET state = 'withdrawn', reason = '作者撤回'
-                                 WHERE id = ? AND mine = 1 AND state IN ('pending', 'published')""",
-                              (item_id,)).rowcount:
+            author = require_author(db)
+            if not db.execute('SELECT 1 FROM post WHERE id = ? AND author = ?',
+                              (item_id, author)).fetchone():
+                abort(404, '投稿不存在')
+            if not db.execute('''UPDATE post SET state = 'withdrawn', reason = '作者撤回'
+                                 WHERE id = ? AND author = ? AND state IN ('pending', 'published')''',
+                              (item_id, author)).rowcount:
                 abort(409, '稿件状态已变化，请刷新')
+            audit(db, item_id, '作者', 'withdraw', 'withdrawn', '作者撤回')
         return jsonify(ok=True)
 
     @pages.post('/review/login')
     def login():
         data = payload()
         supplied = data.get('password')
-        if (data.get('username') != 'reviewer' or not isinstance(supplied, str)
+        if (data.get('username') != reviewer_username or not isinstance(supplied, str)
                 or not compare_digest(supplied.encode(), reviewer_password.encode())):
             abort(401, '账号或口令不正确')
-        return jsonify(token=reviewer_token)
+        token = token_urlsafe(32)
+        now = time()
+        with database() as db:
+            db.execute('DELETE FROM reviewer_session WHERE expires_at <= ?', (now,))
+            db.execute('INSERT INTO reviewer_session VALUES (?, ?)', (hash_reviewer_token(token), now + 8 * 3600))
+        return jsonify(token=token, role='reviewer')
 
-    def require_reviewer():
-        authorization = request.headers.get('Authorization', '').encode()
-        if not compare_digest(authorization, f'Bearer {reviewer_token}'.encode()):
+    def require_reviewer(db):
+        scheme, _, token = request.headers.get('Authorization', '').partition(' ')
+        if scheme.lower() != 'bearer' or not token:
+            if author_for(db):
+                abort(403, '当前身份没有树洞审核权限')
             abort(401, '请先登录审核台')
+        token_hash = hash_reviewer_token(token)
+        if not db.execute('SELECT 1 FROM reviewer_session WHERE token_hash = ? AND expires_at > ?',
+                          (token_hash, time())).fetchone():
+            abort(401, '审核登录已失效，请重新登录')
+        return token_hash
+
+    @pages.get('/review/me')
+    def reviewer_identity():
+        with database() as db:
+            require_reviewer(db)
+        return jsonify(role='reviewer')
+
+    @pages.post('/review/logout')
+    def logout():
+        with database() as db:
+            digest = require_reviewer(db)
+            db.execute('DELETE FROM reviewer_session WHERE token_hash = ?', (digest,))
+        return jsonify(ok=True)
+
+    @pages.get('/review/history')
+    def review_history():
+        with database() as db:
+            require_reviewer(db)
+            return jsonify([dict(row) for row in db.execute(
+                'SELECT * FROM post_audit ORDER BY id DESC LIMIT 100')])
 
     @pages.get('/review/posts')
     def review_posts():
-        require_reviewer()
         with database() as db:
+            require_reviewer(db)
             return jsonify([dict(row) for row in db.execute(
                 'SELECT id, kind, body, state, reason, day FROM post ORDER BY id DESC')])
 
     @pages.post('/review/posts/<int:item_id>')
     def review(item_id):
-        require_reviewer()
-        data = payload()
-        transition = {
-            'approve': ('pending', 'published', '人工审核通过'),
-            'reject': ('pending', 'rejected', '人工审核驳回'),
-            'remove': ('published', 'removed', '管理员下架'),
-        }.get(str(data.get('action')))
-        if transition is None:
-            abort(400, '未知审核操作')
-        previous, state, default_reason = transition
-        reason = data.get('reason', '')
-        if not isinstance(reason, str) or len(reason.strip()) > 120:
-            abort(400, '审核原因最多 120 字')
-        if state == 'rejected' and not reason.strip():
-            abort(400, '请填写驳回原因')
         with database() as db:
+            require_reviewer(db)
+            data = payload()
+            transition = {
+                'approve': ('pending', 'published', '人工审核通过'),
+                'reject': ('pending', 'rejected', '人工审核驳回'),
+                'remove': ('published', 'removed', '管理员下架'),
+            }.get(str(data.get('action')))
+            if transition is None:
+                abort(400, '未知审核操作')
+            previous, state, default_reason = transition
+            reason = data.get('reason', '')
+            if not isinstance(reason, str) or len(reason.strip()) > 120:
+                abort(400, '审核原因最多 120 字')
+            if state == 'rejected' and not reason.strip():
+                abort(400, '请填写驳回原因')
+            reason = reason.strip() or default_reason
             if not db.execute('UPDATE post SET state = ?, reason = ? WHERE id = ? AND state = ?',
-                              (state, reason.strip() or default_reason, item_id, previous)).rowcount:
+                              (state, reason, item_id, previous)).rowcount:
                 abort(409, '稿件状态已变化，请刷新')
+            audit(db, item_id, reviewer_username, data['action'], state, reason)
         return jsonify(ok=True)
 
     return pages

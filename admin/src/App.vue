@@ -3,6 +3,7 @@
     <aside>
       <div class="brand"><span class="mark">心</span><div><strong>心屿</strong><small>内容管理端</small></div></div>
       <p class="aside-label">树洞管理</p>
+      <a class="shared-feed-link" :href="sharedFeedUrl">打开同界面树洞审核 ↗</a>
       <button v-for="tab in tabs" :key="tab.id" :disabled="!token" :class="{ active: selected === tab.id }" @click="select(tab.id)">{{ tab.name }}</button>
       <small class="demo-label">课程演示 · 虚构内容</small>
     </aside>
@@ -48,12 +49,13 @@
 <script setup>
 import { computed, ref } from 'vue'
 
+const sharedFeedUrl = (import.meta.env.VITE_CLIENT_URL || 'http://127.0.0.1:5173') + '/#/pages/island/index?mode=treehole'
 const api = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5000') + '/api/demo/review'
 const tabs = [{ id: 'pending', name: '待审核' }, { id: 'published', name: '已发布' }, { id: 'closed', name: '处理记录' }]
 const labels = { pending: '待审核', published: '已发布', blocked: '自动拦截', rejected: '已驳回', removed: '已下架', withdrawn: '已撤回' }
 const selected = ref('pending')
 const currentTab = computed(() => tabs.find(tab => tab.id === selected.value))
-const username = ref('reviewer')
+const username = ref('admin')
 const password = ref('')
 const token = ref('')
 const posts = ref([])
@@ -91,12 +93,13 @@ function login() {
   })
 }
 function logout() {
-  if (busy.value) return
-  token.value = ''
-  error.value = ''
-  posts.value = []
-  reasons.value = {}
-  selected.value = 'pending'
+  return run(async () => {
+    await request('/logout', {})
+    token.value = ''
+    posts.value = []
+    reasons.value = {}
+    selected.value = 'pending'
+  })
 }
 function refresh() {
   return run(async () => { posts.value = await request('/posts') })
@@ -129,6 +132,7 @@ aside small, .aside-label { color: #b9d1c2; font-size: 12px; }
 aside button { display: block; width: 100%; text-align: left; background: transparent; color: #e7f0ea; margin: 7px 0; }
 aside .active { background: #436859; }
 .demo-label { margin-top: 34px; }
+.shared-feed-link { display: block; margin: 8px 0 13px; color: #e7f0ea; font-size: 13px; }
 header { display: flex; justify-content: space-between; align-items: center; min-height: 63px; background: #fff; padding: 12px 28px; border-bottom: 1px solid #dde6df; font-size: 14px; }
 .content { max-width: 1040px; margin: auto; padding: 26px; }
 .hero { background: #e1ece4; border-radius: 20px; padding: 24px 27px; }

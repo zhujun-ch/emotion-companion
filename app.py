@@ -19,12 +19,28 @@ load_dotenv(BASE_DIR / ".env")
 app = Flask(__name__)
 CORS(app)
 
-if os.getenv('ENABLE_DEMO_PAGES') == '1':
-    from demo_pages import create_demo_pages
+DEMO_PAGES_ENABLED = os.getenv('ENABLE_DEMO_PAGES') == '1'
+DEMO_DATA_DIR = BASE_DIR / os.getenv('DEMO_DATA_DIR', 'artifacts')
 
-    demo_path = BASE_DIR / 'artifacts/pages_demo.sqlite3'
-    demo_path.parent.mkdir(exist_ok=True)
-    app.register_blueprint(create_demo_pages(demo_path, os.environ['DEMO_REVIEWER_PASSWORD']))
+if DEMO_PAGES_ENABLED:
+    from functools import partial
+    from demo_pages import create_demo_pages
+    from treehole_moderation import moderate_treehole
+
+    demo_path = DEMO_DATA_DIR / 'pages_demo.sqlite3'
+    demo_path.parent.mkdir(parents=True, exist_ok=True)
+    moderator = partial(
+        moderate_treehole,
+        base_url=os.getenv('OLLAMA_BASE_URL', 'http://127.0.0.1:11434'),
+        model=os.getenv('OLLAMA_MODEL', 'qwen2.5:7b'),
+    )
+    reviewer_password = os.getenv('DEMO_REVIEWER_PASSWORD')
+    if not reviewer_password:
+        raise RuntimeError('请在 .env 或部署环境中设置 DEMO_REVIEWER_PASSWORD')
+    app.register_blueprint(create_demo_pages(
+        demo_path, reviewer_password, moderator,
+        reviewer_username=os.getenv('DEMO_REVIEWER_USERNAME', 'admin'),
+    ))
 
 
 # Train/inference share the same vocabulary, tokenizer, model config, and label mapping.
@@ -40,8 +56,11 @@ def predict_emotion(text):
     return emotion_predictor.predict(text)
 
 
-DB_BACKEND = os.getenv("DB_BACKEND", "mysql").lower()
-SQLITE_PATH = BASE_DIR / os.getenv("SQLITE_PATH", "artifacts/demo.sqlite3")
+DB_BACKEND = os.getenv("DB_BACKEND", "sqlite" if DEMO_PAGES_ENABLED else "mysql").lower()
+SQLITE_PATH = (
+    DEMO_DATA_DIR / 'pages_chat_demo.sqlite3' if DEMO_PAGES_ENABLED
+    else BASE_DIR / os.getenv("SQLITE_PATH", "artifacts/demo.sqlite3")
+)
 
 
 def get_db_conn():
