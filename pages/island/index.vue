@@ -52,6 +52,7 @@
           <view class="island-chips">
             <button :class="{ selected: range === 7 }" @click="chooseRange(7)">近 7 天</button>
             <button :class="{ selected: range === 30 }" @click="chooseRange(30)">近 30 天</button>
+            <button :class="{ selected: range === 90 }" @click="chooseRange(90)">近 90 天</button>
           </view>
           <view class="island-chips">
             <picker mode="date" :value="start" @change="changeRange('start', $event.detail.value)"><view class="island-date">起始 {{ start }}</view></picker>
@@ -67,6 +68,9 @@
               <text>{{ row.label }}</text><view class="island-track"><view class="island-bar" :style="{ width: row.percent + '%' }" /></view><text>{{ row.count }}</text>
             </view>
             <view class="island-list-title">按日记录数</view>
+            <view class="island-trend">
+              <qiun-data-charts type="line" :chartData="dailyChart" :opts="dailyChartOptions" />
+            </view>
             <view v-for="row in daily" :key="row.day" class="island-day"><text>{{ row.day }}</text><text>{{ row.count }} 篇</text></view>
           </template>
         </view>
@@ -171,6 +175,7 @@ import { computed, ref, watch } from 'vue'
 import { onLoad, onShow } from '@dcloudio/uni-app'
 import { beijingDay, demoRequest } from '../../composables/demoPages'
 import { reviewerToken, reviewRequest, treeholeRequest } from '../../composables/treehole'
+import QiunDataCharts from '../../uni_modules/qiun-data-charts/components/qiun-data-charts/qiun-data-charts.vue'
 
 const areas = {
   diary: { title: '心情日记', english: 'JOURNAL', description: '留一点时间，把今天的感受写下来。演示请使用虚构内容。' },
@@ -236,6 +241,19 @@ const counts = computed(() => moods.map(label => {
 const daily = computed(() => [...new Set(filtered.value.map(entry => entry.day))].map(day => ({
   day, count: filtered.value.filter(entry => entry.day === day).length,
 })))
+const dailyChart = computed(() => {
+  const chronological = [...daily.value].reverse()
+  return {
+    categories: chronological.map(row => row.day),
+    series: [{ name: '日记篇数', data: chronological.map(row => row.count) }],
+  }
+})
+const dailyChartOptions = {
+  color: ['#6d8963'],
+  legend: { show: false },
+  xAxis: { labelCount: 4 },
+  yAxis: { data: [{ min: 0, tofix: 0 }] },
+}
 
 onLoad(options => {
   const requested = options?.mode
@@ -468,6 +486,7 @@ function applyReview(id, action, reason = '', type = 'post') {
 .island-comment .island-body { margin: 5px 0 8px; font-size: 14px; }
 .island-reply-form { margin-top: 12px; }
 .island-chart-row { display: grid; grid-template-columns: 36px 1fr 24px; align-items: center; gap: 10px; margin: 12px 0; font-size: 13px; }
+.island-trend { height: 240px; margin: 12px 0; }
 .island-track { background: #edf2e8; border-radius: 6px; height: 12px; overflow: hidden; }
 .island-bar { background: #719874; height: 100%; }
 .island-day { display: flex; justify-content: space-between; border-bottom: 1px solid #edf2e8; padding: 8px 0; font-size: 13px; }
