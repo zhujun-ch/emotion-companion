@@ -52,7 +52,7 @@
     <view class="main-shell">
       <!-- 顶部信息栏 -->
       <view class="topbar">
-        <view class="breadcrumb">我的小岛 > <text class="active-breadcrumb">心事倾诉</text></view>
+        <view class="breadcrumb">我的小岛 / <text class="active-breadcrumb">心事倾诉</text></view>
         <view class="topbar-right">
           <text class="mode-pill">● 课程演示版</text>
         </view>
@@ -268,15 +268,15 @@ page {
 .new-chat-btn { font-size: 11px; padding: 9px 15px; border: 1px solid #e0e6d7; border-radius: 7px; color: #77866b; background: #fbfcf8; cursor: pointer;}
 
 /* ============ 聊天区布局 ============ */
-.chat-layout { display: flex; gap: 22px; flex: 1; overflow: hidden; }
-.chat-panel { flex: 1; background: #fffefa; border: 1px solid #e8eae2; border-radius: 13px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 3px 10px rgba(83,99,67,0.02); }
+.chat-layout { display: flex; gap: 22px; flex: 1; min-height: 0; overflow: hidden; }
+.chat-panel { flex: 1; min-width: 0; background: #fffefa; border: 1px solid #e8eae2; border-radius: 13px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 3px 10px rgba(83,99,67,0.02); }
 .chat-panel-header { height: 76px; padding: 0 25px; display: flex; align-items: center; border-bottom: 1px solid #eeefe8; }
 .companion-heading { display: flex; align-items: center; gap: 10px; }
 .companion-avatar { width: 34px; height: 34px; border-radius: 11px; background: #eaf0e1; color: #7f9b70; display: flex; align-items: center; justify-content: center; font-weight: bold; }
 .companion-name { font-size: 12px; font-weight: 500; color: #3c483e; }
 .companion-status { font-size: 9px; color: #9aa88d; margin-top: 4px; }
 
-.message-space { flex: 1; padding: 12px 27px 24px; overflow-y: auto; background: #fffefa; }
+.message-space { flex: 1; min-height: 0; width: 100%; box-sizing: border-box; padding: 12px 27px 24px; overflow-y: auto; background: #fffefa; }
 .chat-welcome { text-align: center; padding-top: 30px; }
 
 /* 纯 CSS 绘制中岛插画 */
@@ -302,8 +302,9 @@ page {
 .user-message { display: flex; flex-direction: column; align-items: flex-end; margin-bottom: 20px; }
 .user-message .message-bubble { background: #e9efdf; border-radius: 11px 2px 11px 11px; padding: 12px 16px; max-width: 85%; color: #617451; font-size: 12px; line-height: 2; }
 .assistant-message { display: flex; align-items: flex-start; gap: 10px; }
-.assistant-message .companion-avatar { width: 29px; height: 29px; border-radius: 9px; background: #edf2e5; color: #8ba47b; font-size: 12px; }
-.assistant-body { max-width: 91%; }
+.assistant-message .companion-avatar { flex-shrink: 0; width: 29px; height: 29px; border-radius: 9px; background: #edf2e5; color: #8ba47b; font-size: 12px; }
+.assistant-body { min-width: 0; max-width: calc(100% - 39px); }
+.message-bubble { overflow-wrap: anywhere; }
 .assistant-body .message-bubble { color: #748168; border: 1px solid #edf0e4; background: #fdfef9; border-radius: 2px 11px 11px 11px; padding: 13px 16px; font-size: 12px; line-height: 2; }
 .message-meta { margin-top: 7px; }
 .emotion-badge { font-size: 9px; color: #8fa17a; background: #edf2e6; padding: 4px 8px; border-radius: 4px; }
@@ -332,6 +333,8 @@ page {
   .topbar { height: 52px; padding: 0 16px; }
   .page { padding: 14px; overflow: auto; }
   .page-heading { flex-wrap: wrap; gap: 10px; }
+  .message-space { padding: 12px 16px 18px; }
+  .mood-selector { flex-wrap: wrap; gap: 12px; }
   .mobile-nav { display: flex; gap: 8px; margin: 0 0 16px; }
   .mobile-module { flex: 1 1 0; min-width: 0; text-align: center; padding: 8px 0; font-size: 13px; line-height: 1.5; background: #e4edda; color: #345642; }
 }

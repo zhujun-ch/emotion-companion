@@ -78,35 +78,79 @@
           <view class="island-chips">
             <button v-for="kind in kinds" :key="kind" :class="{ selected: post.kind === kind }" @click="post.kind = kind">{{ kind }}</button>
           </view>
-          <textarea v-model="post.body" class="island-textarea" maxlength="500" placeholder="留一句鼓励，或者说说你此刻的心情。" />
+          <textarea :value="post.body" @input="updatePostBody" class="island-textarea" maxlength="500"
+            placeholder="留一句鼓励，或者说说你此刻的心情。" />
           <view class="island-actions">
-            <text>匿名展示 · {{ post.body.length }} / 500</text>
-            <button class="island-primary" :disabled="busy || !post.body.trim()" @click="submitPost">匿名提交</button>
+            <text v-if="submittingPost">正在审核，请稍等…</text>
+            <text v-else>匿名展示 · {{ post.body.length }} / 500</text>
+            <button class="island-primary" :disabled="!canSubmitPost" @click="submitPost">匿名提交</button>
           </view>
         </view>
         <view class="island-chips island-feed-tabs">
-          <button :class="{ selected: !showMine }" @click="showMine = false">树洞留言</button>
-          <button :class="{ selected: showMine }" @click="showMine = true">我的投稿</button>
-          <button :disabled="loading" @click="refresh">刷新</button>
+          <button :class="{ selected: feedTab === 'public' }" @click="setFeedTab('public')">树洞留言</button>
+          <button :class="{ selected: feedTab === 'mine' }" @click="setFeedTab('mine')">我的投稿</button>
+          <button v-if="reviewerToken" :class="{ selected: feedTab === 'pending' }" @click="setFeedTab('pending')">待审核</button>
+          <button v-if="reviewerToken" :class="{ selected: feedTab === 'audit' }" @click="setFeedTab('audit')">处理记录</button>
+          <button :disabled="loading || busy" @click="refresh">刷新</button>
         </view>
-        <view v-if="!visiblePosts.length && !loading" class="island-empty">这里暂时没有留言。</view>
-        <view v-for="item in visiblePosts" :key="item.id" class="island-card island-entry">
-          <view class="island-meta"><text class="island-tag">{{ item.kind }}</text> {{ showMine ? states[item.state] : '匿名留言' }} · {{ item.day }}</view>
-          <view class="island-body">{{ item.body }}</view>
-          <view v-if="showMine" class="island-actions">
-            <text>{{ item.reason }}</text>
-            <button v-if="['pending', 'published'].includes(item.state)" :disabled="busy" @click="withdraw(item.id)">撤回</button>
+        <view class="island-review-entry">
+          <text v-if="reviewerToken">管理员模式</text>
+          <button v-if="reviewerToken" :disabled="busy" @click="logoutReviewer">退出管理</button>
+          <button v-else @click="showReviewerLogin = !showReviewerLogin">{{ showReviewerLogin ? '收起登录' : '管理员登录' }}</button>
+        </view>
+        <view v-if="showReviewerLogin && !reviewerToken" class="island-card">
+          <view class="island-card-title">树洞管理员登录</view>
+          <input v-model.trim="reviewerName" class="island-review-input" maxlength="40" placeholder="审核员账号" />
+          <input v-model="reviewerPassword" class="island-review-input" password maxlength="120" placeholder="演示口令" />
+          <view class="island-actions">
+            <button class="island-primary" :disabled="busy || !reviewerName || !reviewerPassword" @click="loginReviewer">登录</button>
           </view>
         </view>
+        <template v-if="feedTab === 'audit' && reviewerToken">
+          <view v-if="!reviewHistory.length && !loading" class="island-empty">暂无处理记录。</view>
+          <view v-for="entry in reviewHistory" :key="entry.id" class="island-card island-entry">
+            <view class="island-meta">#{{ entry.post_id }} · {{ auditActions[entry.action] }} · {{ entry.actor }}</view>
+            <view class="island-body">{{ states[entry.state] }} · {{ entry.reason }}</view>
+            <view class="island-meta">{{ entry.created_at }} UTC</view>
+          </view>
+        </template>
+        <template v-else>
+          <view v-if="!visiblePosts.length && !loading" class="island-empty">这里暂时没有留言。</view>
+          <view v-for="item in visiblePosts" :key="item.id" class="island-card island-entry">
+            <view class="island-meta"><text class="island-tag">{{ item.kind }}</text> {{ feedTab === 'public' ? '匿名留言' : states[item.state] }} · {{ item.day }}</view>
+            <view class="island-body">{{ item.body }}</view>
+            <view v-if="feedTab === 'mine'" class="island-actions">
+              <text>{{ item.reason }}</text>
+              <button v-if="['pending', 'published'].includes(item.state)" :disabled="busy" @click="withdraw(item.id)">撤回</button>
+            </view>
+            <view v-if="reviewerToken && feedTab === 'public'" class="island-actions">
+              <button class="island-danger" :disabled="busy" @click="prepareReview(item.id, 'remove')">下架</button>
+            </view>
+            <view v-if="reviewerToken && feedTab === 'pending'" class="island-actions">
+              <text>{{ item.reason }}</text>
+              <button class="island-danger" :disabled="busy" @click="prepareReview(item.id, 'reject')">驳回</button>
+              <button class="island-primary" :disabled="busy" @click="applyReview(item.id, 'approve')">通过并发布</button>
+            </view>
+            <view v-if="reviewTarget?.id === item.id" class="island-review-form">
+              <view class="island-meta">{{ reviewTarget.action === 'reject' ? '驳回投稿' : '下架留言' }} #{{ reviewTarget.id }}</view>
+              <input v-model="reviewReason" class="island-review-input" maxlength="120" placeholder="填写处理原因" />
+              <view class="island-actions">
+                <button :disabled="busy" @click="reviewTarget = null">取消</button>
+                <button class="island-danger" :disabled="busy || !reviewReason.trim()" @click="confirmReview">确认处理</button>
+              </view>
+            </view>
+          </view>
+        </template>
       </template>
     </view>
   </scroll-view>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { onLoad, onShow } from '@dcloudio/uni-app'
 import { beijingDay, demoRequest } from '../../composables/demoPages'
+import { reviewerToken, reviewRequest, treeholeRequest } from '../../composables/treehole'
 
 const areas = {
   diary: { title: '心情日记', english: 'JOURNAL', description: '留一点时间，把今天的感受写下来。演示请使用虚构内容。' },
@@ -124,8 +168,26 @@ const mode = ref('diary')
 const area = computed(() => areas[mode.value])
 const diaries = ref([])
 const posts = ref({ public: [], mine: [] })
-const showMine = ref(false)
-const visiblePosts = computed(() => showMine.value ? posts.value.mine : posts.value.public)
+const feedTab = ref('public')
+const showReviewerLogin = ref(false)
+const reviewerName = ref('admin')
+const reviewerPassword = ref('')
+const pendingPosts = ref([])
+const reviewHistory = ref([])
+const reviewTarget = ref(null)
+const reviewReason = ref('')
+const auditActions = { auto: '自动审核', approve: '通过', reject: '驳回', remove: '下架', withdraw: '撤回' }
+const visiblePosts = computed(() => {
+  if (feedTab.value === 'pending') return pendingPosts.value
+  return feedTab.value === 'mine' ? posts.value.mine : posts.value.public
+})
+watch(reviewerToken, token => {
+  if (token) return
+  pendingPosts.value = []
+  reviewHistory.value = []
+  reviewTarget.value = null
+  if (['pending', 'audit'].includes(feedTab.value)) feedTab.value = 'public'
+})
 const newDiary = () => ({ day: beijingDay(), mood: moods[0], body: '' })
 const diary = ref(newDiary())
 const editingId = ref(null)
@@ -133,6 +195,9 @@ const post = ref({ kind: kinds[0], body: '' })
 const error = ref('')
 const loading = ref(false)
 const busy = ref(false)
+const submittingPost = ref(false)
+const canSubmitPost = computed(() => !busy.value && post.value.body.trim().length > 0)
+let latestRefresh = 0
 const range = ref(7)
 const start = ref(beijingDay(-6))
 const end = ref(beijingDay())
@@ -152,16 +217,32 @@ onLoad(options => {
 onShow(refresh)
 
 async function refresh() {
+  const refreshId = ++latestRefresh
   const selected = mode.value
+  const tab = feedTab.value
   loading.value = true
   error.value = ''
   try {
-    if (selected === 'treehole') posts.value = await demoRequest('/posts')
-    else diaries.value = await demoRequest('/diaries')
+    if (selected === 'treehole') {
+      const updatedPosts = await treeholeRequest('/posts')
+      if (refreshId !== latestRefresh) return
+      posts.value = updatedPosts
+      if (reviewerToken.value && tab === 'pending') {
+        const reviewed = await reviewRequest('/posts')
+        if (refreshId === latestRefresh) pendingPosts.value = reviewed.filter(item => item.state === 'pending')
+      }
+      if (reviewerToken.value && tab === 'audit') {
+        const history = await reviewRequest('/history')
+        if (refreshId === latestRefresh) reviewHistory.value = history
+      }
+    } else {
+      const updatedDiaries = await demoRequest('/diaries')
+      if (refreshId === latestRefresh) diaries.value = updatedDiaries
+    }
   } catch (failure) {
-    if (selected === mode.value) error.value = failure.message
+    if (refreshId === latestRefresh) error.value = failure.message
   } finally {
-    if (selected === mode.value) loading.value = false
+    if (refreshId === latestRefresh) loading.value = false
   }
 }
 function selectTab(event) {
@@ -227,16 +308,67 @@ function deleteDiary(id) {
     },
   })
 }
-function submitPost() {
-  return mutate(async () => {
-    const result = await demoRequest('/posts', 'POST', post.value)
-    post.value.body = ''
-    showMine.value = true
-    uni.showToast({ title: states[result.state], icon: 'none' })
-  })
+function updatePostBody(event) {
+  post.value.body = event.detail.value
+}
+async function submitPost() {
+  if (!canSubmitPost.value) return
+  const { kind, body } = post.value
+  submittingPost.value = true
+  try {
+    await mutate(async () => {
+      const result = await treeholeRequest('/posts', 'POST', { kind, body: body.trim() })
+      if (post.value.body === body) post.value.body = ''
+      feedTab.value = 'mine'
+      reviewTarget.value = null
+      uni.showToast({ title: states[result.state], icon: 'none' })
+    })
+  } finally {
+    submittingPost.value = false
+  }
 }
 function withdraw(id) {
-  return mutate(() => demoRequest('/posts/' + id + '/withdraw', 'POST'))
+  return mutate(() => treeholeRequest('/posts/' + id + '/withdraw', 'POST'))
+}
+function setFeedTab(tab) {
+  if (busy.value || feedTab.value === tab) return
+  feedTab.value = tab
+  reviewTarget.value = null
+  refresh()
+}
+function loginReviewer() {
+  return mutate(async () => {
+    const { token, role } = await reviewRequest('/login', 'POST', {
+      username: reviewerName.value,
+      password: reviewerPassword.value,
+    })
+    if (role !== 'reviewer' || !token) throw new Error('账号没有树洞审核权限')
+    reviewerToken.value = token
+    reviewerPassword.value = ''
+    showReviewerLogin.value = false
+  })
+}
+function logoutReviewer() {
+  return mutate(async () => {
+    await reviewRequest('/logout', 'POST')
+    reviewerToken.value = ''
+  })
+}
+function prepareReview(id, action) {
+  reviewReason.value = ''
+  reviewTarget.value = { id, action }
+}
+function confirmReview() {
+  if (!reviewTarget.value || !reviewReason.value.trim()) return
+  const { id, action } = reviewTarget.value
+  return applyReview(id, action, reviewReason.value.trim())
+}
+function applyReview(id, action, reason = '') {
+  return mutate(async () => {
+    await reviewRequest('/posts/' + id, 'POST', { action, reason })
+    reviewTarget.value = null
+    uni.showToast({ title: '审核操作已保存', icon: 'none' })
+  })
 }
 </script>
 
@@ -258,6 +390,10 @@ function withdraw(id) {
 .island-layout button::after { border: none; }
 .island-layout .selected { background: #d5e5ce; color: #244832; font-weight: 700; }
 .island-layout .island-primary { background: #355f47; color: #fff; }
+.island-layout .island-danger { background: #f7ebe6; color: #8e4438; }
+.island-review-entry { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-bottom: 12px; color: #546f5c; font-size: 12px; }
+.island-review-form { border-top: 1px solid #e5eae0; margin-top: 14px; padding-top: 12px; }
+.island-review-input { box-sizing: border-box; width: 100%; height: 40px; margin-top: 8px; padding: 0 10px; border: 1px solid #dce5d7; border-radius: 8px; font-size: 14px; }
 .island-layout button[disabled] { opacity: .58; }
 .island-date { display: inline-block; padding: 8px 11px; background: #f0f3eb; border-radius: 8px; font-size: 13px; cursor: pointer; }
 .island-textarea { box-sizing: border-box; width: 100%; height: 104px; padding: 12px; border: 1px solid #dce5d7; border-radius: 10px; font-size: 15px; line-height: 1.6; }
