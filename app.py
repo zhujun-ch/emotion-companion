@@ -19,6 +19,13 @@ load_dotenv(BASE_DIR / ".env")
 app = Flask(__name__)
 CORS(app)
 
+if os.getenv('ENABLE_DEMO_PAGES') == '1':
+    from demo_pages import create_demo_pages
+
+    demo_path = BASE_DIR / 'artifacts/pages_demo.sqlite3'
+    demo_path.parent.mkdir(exist_ok=True)
+    app.register_blueprint(create_demo_pages(demo_path, os.environ['DEMO_REVIEWER_PASSWORD']))
+
 
 # Train/inference share the same vocabulary, tokenizer, model config, and label mapping.
 EMOTION_MODEL_DIR = BASE_DIR / os.getenv("EMOTION_MODEL_DIR", "artifacts/emotion_cnn")

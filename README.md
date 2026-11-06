@@ -43,3 +43,15 @@
 重新训练不改变现有校准文件，但新权重不匹配时该文件自动失效；须重新运行校准。结果位于 artifacts/emotion_cnn/calibration.json。
 
 验证命令：`.venv\Scripts\python.exe -m unittest discover -s tests -v`。
+
+## 三端页面演示
+
+先运行 `start-ollama.cmd` 和 `start-pages-demo-backend.cmd`，再分别打开三个前端。
+
+- 网页客户端运行 `start-frontend.cmd`，打开 http://127.0.0.1:5173/ 。
+- 管理端进入 `admin` 目录运行 `npm.cmd ci`，再运行 `npx.cmd vite --host 127.0.0.1 --port 5174`，打开 http://127.0.0.1:5174/ 。演示账号为 `reviewer`，默认口令为 `xinyu-demo`。
+- 小程序运行 `build-demo-miniprogram.cmd`。微信开发者工具中打开仓库根目录项目并编译，也可直接导入 `frontend/unpackage/dist/dev/mp-weixin-mobile`。HBuilderX 安装位置不同时，通过 `HX_APP_ROOT` 指定。若重新构建后模拟器仍显示旧布局或文字错位，选择「项目 → 重新打开此项目」，再重新编译。
+
+建议演示顺序为新增日记、查看看板、匿名投稿、管理端通过、用户端刷新树洞。树洞演示规则拦截链接和手机号，其余新投稿进入待审。日记与树洞共用一套虚构样例空间，聊天沿用现有本地身份。演示数据单独保存在 `artifacts/pages_demo.sqlite3` 与 `artifacts/pages_chat_demo.sqlite3`。
+
+同网手机联调时，启动后端前将 `APP_HOST` 设为 `0.0.0.0`，构建小程序前将 `VITE_API_BASE` 设为电脑局域网的后端地址。小程序使用实际的真机调试配置。本轮演示只填虚构内容。
