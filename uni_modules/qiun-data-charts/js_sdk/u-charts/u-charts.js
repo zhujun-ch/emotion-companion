@@ -2267,10 +2267,6 @@ function drawPointText(points, series, config, context, opts) {
   var textOffset = series.textOffset ? series.textOffset : 0;
   points.forEach(function(item, index) {
     if (item !== null) {
-      context.beginPath();
-      var fontSize = series.textSize ? series.textSize * opts.pix : config.fontSize;
-      context.setFontSize(fontSize);
-      context.setFillStyle(series.textColor || opts.fontColor);
       var value = data[index]
       if (typeof data[index] === 'object' && data[index] !== null) {
         if (data[index].constructor.toString().indexOf('Array')>-1) {
@@ -2279,6 +2275,11 @@ function drawPointText(points, series, config, context, opts) {
           value = data[index].value
         }
       }
+      if (opts.hideZeroValues && value === 0) return;
+      context.beginPath();
+      var fontSize = series.textSize ? series.textSize * opts.pix : config.fontSize;
+      context.setFontSize(fontSize);
+      context.setFillStyle(series.textColor || opts.fontColor);
       var formatVal = series.formatter ? series.formatter(value,index,series,opts) : value;
       context.setTextAlign('center');
       context.fillText(String(formatVal), item.x, item.y - 4 + textOffset * opts.pix);
@@ -7421,6 +7422,9 @@ uCharts.prototype.showToolTip = function(e) {
     var index = option.index == undefined ? current.index : option.index;
     if (index > -1 || index.length>0) {
       var seriesData = getSeriesDataItem(this.opts.series, index, current.group);
+      if (opts.hideZeroValues) {
+        seriesData = seriesData.filter(function(item) { return item.data !== 0; });
+      }
       if (seriesData.length !== 0) {
         var _getToolTipData = getToolTipData(seriesData, this.opts, index, current.group, this.opts.categories, option),
           textList = _getToolTipData.textList,

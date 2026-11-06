@@ -15,27 +15,27 @@
       <view class="nav-label">我的小岛 <text class="nav-en">MY LITTLE ISLAND</text></view>
 
       <view class="nav-list">
-        <view class="nav-item active nav-link" @click="openConversation()">
+        <view class="nav-item nav-link" :class="{ active: section === 'home' || section === 'chat' }" @click="showChat()">
           <text class="nav-icon">💬</text>
           <view>
             <view>心事倾诉</view>
             <view class="nav-item-en">A space to talk</view>
           </view>
         </view>
-        <navigator class="nav-item nav-link" url="/pages/island/index?mode=board">
+        <view class="nav-item nav-link" :class="{ active: section === 'board' }" @click="section = 'board'">
           <text class="nav-icon">📊</text>
           <view>
             <view>情绪看板</view>
             <view class="nav-item-en">Meet your feelings</view>
           </view>
-        </navigator>
-        <navigator class="nav-item nav-link" url="/pages/island/index?mode=diary">
+        </view>
+        <view class="nav-item nav-link" :class="{ active: section === 'diary' }" @click="section = 'diary'">
           <text class="nav-icon">📝</text>
           <view>
             <view>心情日记</view>
             <view class="nav-item-en">Little moments</view>
           </view>
-        </navigator>
+        </view>
       </view>
 
       <navigator class="nav-item nav-link" url="/pages/island/index?mode=treehole">
@@ -52,18 +52,23 @@
     <view class="main-shell">
       <!-- 顶部信息栏 -->
       <view class="topbar">
-        <view class="breadcrumb">我的小岛 / <text class="active-breadcrumb">心事倾诉</text></view>
+        <view class="breadcrumb">我的小岛 › <text class="active-breadcrumb">{{ sectionTitle }}</text></view>
         <view class="topbar-right">
           <text class="mode-pill">● 课程演示版</text>
         </view>
       </view>
 
-      <view class="page">
-        <view class="mobile-nav">
-          <navigator class="mobile-module" url="/pages/island/index?mode=diary">心情日记</navigator>
-          <navigator class="mobile-module" url="/pages/island/index?mode=board">情绪看板</navigator>
-          <navigator class="mobile-module" url="/pages/island/index?mode=treehole">情绪树洞</navigator>
-        </view>
+      <view class="mobile-nav">
+        <view class="mobile-module" :class="{ active: section === 'home' || section === 'chat' }" @click="showChat()">心事倾诉</view>
+        <view class="mobile-module" :class="{ active: section === 'board' }" @click="section = 'board'">情绪看板</view>
+        <view class="mobile-module" :class="{ active: section === 'diary' }" @click="section = 'diary'">心情日记</view>
+        <navigator class="mobile-module" url="/pages/island/index?mode=treehole">情绪树洞</navigator>
+      </view>
+
+      <IslandSections v-if="section === 'board' || section === 'diary'" ref="islandSections" embedded
+        :initial-mode="section" @change-mode="section = $event" @open-chat="showChat()" />
+      <ConversationWorkspace v-else-if="section === 'chat'" embedded />
+      <view v-else class="page">
         <!-- 欢迎语 -->
         <view class="page-heading">
           <view>
@@ -77,7 +82,7 @@
         <!-- 核心聊天卡片区 -->
         <view class="chat-layout">
           <!-- 聊天主体框 -->
-          <view class="chat-panel" @click="openConversation()">
+          <view class="chat-panel" @click="showChat()">
             <view class="chat-panel-header">
               <view class="companion-heading">
                 <view class="companion-avatar">心</view>
@@ -104,7 +109,7 @@
 
                 <!-- 情绪圆球 -->
                 <view class="mood-selector">
-                  <view class="mood-item" v-for="m in moods" :key="m.name" @click.stop="openWithMood(m.text)">
+                  <view class="mood-item" v-for="m in moods" :key="m.name" @click.stop="showChat(m.text)">
                     <view class="mood-face" :style="{ color: m.color, background: m.bg, borderColor: m.color }">{{ m.icon }}</view>
                     <text class="mood-name">{{ m.name }}</text>
                   </view>
@@ -135,7 +140,7 @@
             <!-- 底部输入区 -->
             <view class="composer-area">
               <view v-if="error" class="classic-error" @click.stop="retry">{{ error }} · 点击重试</view>
-              <button class="chat-entry" @click.stop="openConversation()">
+              <button class="chat-entry" @click.stop="showChat()">
                 <text>此刻的你，想说些什么？</text>
                 <text class="entry-arrow">开始倾诉 ›</text>
               </button>
@@ -169,18 +174,29 @@
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { onLoad, onShow } from '@dcloudio/uni-app'
 import { useConversations } from '../../composables/useConversations'
+import IslandSections from '../island/IslandSections.vue'
+import ConversationWorkspace from '../conversation/ConversationWorkspace.vue'
 const { messages, isLoading, isInitializing, error, scrollTop,
-  clearChat, initialize, openConversation, retry } = useConversations()
+  clearChat, initialize, chooseMood, retry } = useConversations()
+const section = ref('home')
+const islandSections = ref(null)
+const sectionTitle = computed(() => ({ board: '情绪看板', diary: '心情日记' })[section.value] || '心事倾诉')
+onLoad(options => {
+  if (options?.mode === 'board' || options?.mode === 'diary') section.value = options.mode
+})
+onShow(() => islandSections.value?.refresh())
 onMounted(initialize)
-function openWithMood(text) {
-  openConversation(text)
+function showChat(prefill) {
+  if (typeof prefill === 'string') chooseMood(prefill)
+  section.value = 'chat'
 }
 async function startNewConversation() {
   if (isLoading.value || isInitializing.value) return
   await clearChat()
-  if (!error.value) openConversation()
+  if (!error.value) showChat()
 }
 const moods = [
   { name: '快乐', icon: '☀', color: '#d3a95c', bg: '#fcf4e3', text: '今天发生了一件让我很开心的事情！' },
@@ -254,7 +270,7 @@ page {
   flex-direction: column;
   min-width: 0;
 }
-.topbar { height: 76px; border-bottom: 1px solid #e9ece3; display: flex; align-items: center; justify-content: space-between; padding: 0 43px; background: #f9faf6; }
+.main-shell > .topbar { flex-shrink: 0; height: 76px; border-bottom: 1px solid #e9ece3; display: flex; align-items: center; justify-content: space-between; padding: 0 43px; background: #f9faf6; }
 .breadcrumb { font-size: 11px; color: #a0a697; }
 .active-breadcrumb { color: #63725d; margin-left: 5px; }
 .mode-pill { font-size: 10px; border: 1px solid #dfe5d5; padding: 7px 10px; border-radius: 6px; color: #7b8b70; background: #f1f5eb; }
@@ -330,13 +346,14 @@ page {
 .mobile-nav { display: none; }
 @media (max-width: 760px) {
   .sidebar, .chat-aside { display: none; }
-  .topbar { height: 52px; padding: 0 16px; }
+  .main-shell > .topbar { height: 52px; padding: 0 16px; }
   .page { padding: 14px; overflow: auto; }
   .page-heading { flex-wrap: wrap; gap: 10px; }
   .message-space { padding: 12px 16px 18px; }
   .mood-selector { flex-wrap: wrap; gap: 12px; }
-  .mobile-nav { display: flex; gap: 8px; margin: 0 0 16px; }
+  .mobile-nav { display: flex; flex-shrink: 0; gap: 6px; padding: 14px 14px 0; }
   .mobile-module { flex: 1 1 0; min-width: 0; text-align: center; padding: 8px 0; font-size: 13px; line-height: 1.5; background: #e4edda; color: #345642; }
+  .mobile-module.active { background: #d5e5ce; font-weight: 700; }
 }
 /* #ifdef MP-WEIXIN */
 .app-shell { box-sizing: border-box; padding-top: calc(var(--status-bar-height, 24px) + 44px); }
