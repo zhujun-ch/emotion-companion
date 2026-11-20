@@ -16,8 +16,15 @@ user_id = 'smoke_' + uuid.uuid4().hex[:12]
 text = '我今天拿到了奖学金，心情特别好，想和你分享。'
 health = requests.get(base + '/api/ping', timeout=10)
 health.raise_for_status()
+registration = requests.post(base + '/api/auth/register', json={
+    'username': user_id, 'password': uuid.uuid4().hex,
+}, timeout=10)
+registration.raise_for_status()
+account = registration.json()
+user_id = account['user']['id']
 started = time.perf_counter()
-response = requests.post(base + '/api/chat', json={'user_id': user_id, 'text': text}, timeout=200)
+response = requests.post(base + '/api/chat', json={'text': text},
+                         headers={'Authorization': 'Bearer ' + account['token']}, timeout=200)
 response.raise_for_status()
 result = response.json()
 assert result['status'] == 'success', result

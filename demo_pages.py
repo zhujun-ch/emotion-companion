@@ -3,22 +3,28 @@ from contextlib import contextmanager
 from datetime import date, timedelta
 from hashlib import sha256
 from hmac import digest
-from secrets import compare_digest, token_urlsafe
+from secrets import token_urlsafe
 from time import time
 import sqlite3
 
 from flask import Blueprint, abort, jsonify, request
+from werkzeug.security import generate_password_hash, check_password_hash
+from request_dedup import initialize_receipts, request_identity, fingerprint, receipt, remember
+from deployment_access import initialize_attempts, consume_attempt
 
 MOODS = ('平静', '开心', '低落', '紧张', '生气', '惊喜')
 KINDS = ('鼓励', '倾诉')
 
 
-def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_username='admin'):
+def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, reviewer_username='admin', reviewer_password_hash=None):
     pages = Blueprint('demo_pages', __name__, url_prefix='/api/demo')
+    password_hash = reviewer_password_hash or generate_password_hash(reviewer_password)
+    # Use the configured credential to invalidate reviewer sessions on rotation.
+    session_key = reviewer_password_hash or reviewer_password
 
     @contextmanager
     def database():
-        db = sqlite3.connect(path)
+        db = sqlite3.connect(path, timeout=15)
         db.row_factory = sqlite3.Row
         try:
             with db:
@@ -27,6 +33,8 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
             db.close()
 
     with database() as db:
+        initialize_receipts(db)
+        initialize_attempts(db)
         db.executescript("""
             CREATE TABLE IF NOT EXISTS diary (
                 id INTEGER PRIMARY KEY, day TEXT NOT NULL,
@@ -59,9 +67,21 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
                 reason TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        diary_columns = {row['name'] for row in db.execute('PRAGMA table_info(diary)')}
+        if 'user_id' not in diary_columns:
+            db.execute('ALTER TABLE diary ADD COLUMN user_id TEXT')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_diary_user_day ON diary(user_id, day)')
         columns = {row['name'] for row in db.execute('PRAGMA table_info(post)')}
         if 'author' not in columns:
             db.execute('ALTER TABLE post ADD COLUMN author TEXT')
+        for table in ('post', 'post_comment', 'post_author'):
+            if 'user_id' not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
+                db.execute(f'ALTER TABLE {table} ADD COLUMN user_id TEXT')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_post_user ON post(user_id, id)')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_comment_user ON post_comment(user_id, id)')
+        comment_columns = {row['name'] for row in db.execute('PRAGMA table_info(post_comment)')}
+        if 'parent_comment_id' not in comment_columns:
+            db.execute('ALTER TABLE post_comment ADD COLUMN parent_comment_id INTEGER REFERENCES post_comment(id)')
         if db.execute('INSERT OR IGNORE INTO demo_seed VALUES (1)').rowcount:
             today = date.today()
             db.executemany('INSERT INTO diary(day, mood, body) VALUES (?, ?, ?)', [
@@ -82,6 +102,8 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
     @pages.errorhandler(403)
     @pages.errorhandler(404)
     @pages.errorhandler(409)
+    @pages.errorhandler(429)
+    @pages.errorhandler(410)
     def handle_error(error):
         return jsonify(message=error.description), error.code
 
@@ -99,15 +121,17 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
 
     @pages.get('/diaries')
     def list_diaries():
+        owner = diary_owner()
         with database() as db:
-            return jsonify([dict(row) for row in db.execute('SELECT * FROM diary ORDER BY day DESC, id DESC')])
+            return jsonify([dict(row) for row in db.execute('SELECT id, day, mood, body FROM diary WHERE user_id = ? ORDER BY day DESC, id DESC', (owner,))])
 
     @pages.route('/diaries', methods=['POST'])
     @pages.route('/diaries/<int:item_id>', methods=['PUT', 'DELETE'])
     def change_diary(item_id=None):
+        owner = diary_owner()
         if request.method == 'DELETE':
             with database() as db:
-                if not db.execute('DELETE FROM diary WHERE id = ?', (item_id,)).rowcount:
+                if not db.execute('DELETE FROM diary WHERE id = ? AND user_id = ?', (item_id, owner)).rowcount:
                     abort(404, '日记已不存在')
             return jsonify(ok=True)
 
@@ -120,11 +144,18 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
         if mood not in MOODS:
             abort(400, '请选择心情')
         body = body_text(data, 1000)
+        request_id = request_identity(data) if item_id is None else None
+        content_hash = fingerprint({'day': day, 'mood': mood, 'body': body})
         with database() as db:
+            db.execute('BEGIN IMMEDIATE')
             if item_id is None:
-                db.execute('INSERT INTO diary(day, mood, body) VALUES (?, ?, ?)', (day, mood, body))
-            elif not db.execute('UPDATE diary SET day = ?, mood = ?, body = ? WHERE id = ?',
-                                (day, mood, body, item_id)).rowcount:
+                previous = receipt(db, owner, 'diary', request_id, content_hash)
+                if previous is not None:
+                    return jsonify(previous)
+                db.execute('INSERT INTO diary(day, mood, body, user_id) VALUES (?, ?, ?, ?)', (day, mood, body, owner))
+                return jsonify(remember(db, owner, 'diary', request_id, content_hash, {'ok': True}))
+            elif not db.execute('UPDATE diary SET day = ?, mood = ?, body = ? WHERE id = ? AND user_id = ?',
+                                (day, mood, body, item_id, owner)).rowcount:
                 abort(404, '日记已不存在')
         return jsonify(ok=True)
 
@@ -133,22 +164,7 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
 
     def hash_reviewer_token(token):
         identity = f'{reviewer_username}:{token}'.encode()
-        return digest(reviewer_password.encode(), identity, 'sha256').hex()
-
-    def author_for(db):
-        token = request.headers.get('X-Treehole-Token', '')
-        if not token:
-            return None
-        digest = hash_token(token)
-        if not db.execute('SELECT 1 FROM post_author WHERE token_hash = ?', (digest,)).fetchone():
-            abort(401, '投稿会话已失效，请刷新后重试')
-        return digest
-
-    def require_author(db):
-        author = author_for(db)
-        if not author:
-            abort(401, '请先建立投稿会话')
-        return author
+        return digest(session_key.encode(), identity, 'sha256').hex()
 
     def audit(db, post_id, actor, action, state, reason):
         db.execute('INSERT INTO post_audit(post_id, actor, action, state, reason) VALUES (?, ?, ?, ?, ?)',
@@ -160,19 +176,38 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
 
     @pages.post('/posts/session')
     def start_post_session():
-        token = token_urlsafe(32)
+        abort(410, '投稿已升级为账号归属，请登录并更新客户端')
+
+    @pages.post('/posts/claim')
+    def claim_posts():
+        owner = diary_owner()
+        token = request.headers.get('X-Treehole-Token', '')
+        if not token or len(token) > 128:
+            abort(400, '缺少旧投稿凭据')
+        author = hash_token(token)
         with database() as db:
-            db.execute('INSERT INTO post_author VALUES (?)', (hash_token(token),))
-        return jsonify(token=token)
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT user_id FROM post_author WHERE token_hash=?', (author,)).fetchone()
+            if row is None:
+                abort(401, '旧投稿凭据无效')
+            if row['user_id'] is not None and row['user_id'] != owner:
+                abort(409, '该设备的旧投稿已关联其他账号')
+            db.execute('UPDATE post_author SET user_id=? WHERE token_hash=?', (owner, author))
+            posts = db.execute('UPDATE post SET user_id=? WHERE author=? AND user_id IS NULL', (owner, author)).rowcount
+            comments = db.execute('UPDATE post_comment SET user_id=? WHERE author=? AND user_id IS NULL', (owner, author)).rowcount
+        return jsonify(ok=True, posts=posts, comments=comments)
 
     @pages.get('/posts')
     def list_posts():
+        owner = diary_owner() if request.headers.get('Authorization') else None
         with database() as db:
-            author = author_for(db)
             public = [dict(row) for row in db.execute('''SELECT id, kind, body, day FROM post
                                                         WHERE state = 'published' ORDER BY id DESC''')]
-            comments = db.execute('''SELECT c.id, c.post_id, c.body, c.day FROM post_comment c
+            comments = db.execute('''SELECT c.id, c.post_id, c.body, c.day, c.parent_comment_id,
+                                            parent.body AS parent_body FROM post_comment c
                                      JOIN post p ON p.id = c.post_id
+                                     LEFT JOIN post_comment parent ON parent.id = c.parent_comment_id
+                                         AND parent.post_id = c.post_id AND parent.state = 'published'
                                      WHERE c.state = 'published' AND p.state = 'published'
                                      ORDER BY c.id''')
             grouped = {item['id']: [] for item in public}
@@ -181,74 +216,105 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
             for item in public:
                 item['comments'] = grouped[item['id']]
             mine = db.execute('''SELECT id, kind, body, state, reason, day FROM post
-                                 WHERE author = ? ORDER BY id DESC''', (author,))
-            mine_comments = db.execute('''SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day,
+                                 WHERE user_id = ? ORDER BY id DESC''', (owner,))
+            mine_comments = db.execute('''SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day, c.parent_comment_id,
                                                  p.body AS post_body FROM post_comment c
                                           JOIN post p ON p.id = c.post_id
-                                          WHERE c.author = ? ORDER BY c.id DESC''', (author,))
+                                          WHERE c.user_id = ? ORDER BY c.id DESC''', (owner,))
             return jsonify(public=public, mine=[dict(row) for row in mine],
                            mine_comments=[dict(row) for row in mine_comments])
 
     @pages.post('/posts')
     def submit_post():
+        owner = diary_owner()
         data = payload()
         kind = data.get('kind')
         if kind not in KINDS:
             abort(400, '请选择投稿类型')
         body = body_text(data, 500)
+        request_id = request_identity(data)
+        content_hash = fingerprint({'kind': kind, 'body': body})
         with database() as db:
-            author = require_author(db)
+            previous = receipt(db, owner, 'post', request_id, content_hash)
+            if previous is not None:
+                return jsonify(previous)
         state, reason = moderate_post(body)
         with database() as db:
+            db.execute('BEGIN IMMEDIATE')
+            previous = receipt(db, owner, 'post', request_id, content_hash)
+            if previous is not None:
+                return jsonify(previous)
             item_id = db.execute(
-                'INSERT INTO post(kind, body, state, reason, day, mine, author) VALUES (?, ?, ?, ?, ?, 1, ?)',
-                (kind, body, state, reason, date.today().isoformat(), author),
+                'INSERT INTO post(kind, body, state, reason, day, mine, user_id) VALUES (?, ?, ?, ?, ?, 1, ?)',
+                (kind, body, state, reason, date.today().isoformat(), owner),
             ).lastrowid
             audit(db, item_id, '系统', 'auto', state, reason)
-        return jsonify(id=item_id, state=state, reason=reason)
+            result = remember(db, owner, 'post', request_id, content_hash, dict(id=item_id, state=state, reason=reason))
+        return jsonify(result)
 
     @pages.post('/posts/<int:item_id>/comments')
     def submit_comment(item_id):
-        body = body_text(payload(), 300)
+        owner = diary_owner()
+        data = payload()
+        body = body_text(data, 300)
+        parent_id = data.get('parent_comment_id')
+        if parent_id is not None and (type(parent_id) is not int or not 0 < parent_id < 2**63):
+            abort(400, '回复对象无效')
+        published_target = """SELECT id FROM post WHERE id = ? AND state = 'published'
+            AND (? IS NULL OR EXISTS (SELECT 1 FROM post_comment
+                WHERE id = ? AND post_id = post.id AND state = 'published'))"""
+        target = (item_id, parent_id, parent_id)
+        request_id = request_identity(data)
+        content_hash = fingerprint({'post_id': item_id, 'body': body, 'parent_comment_id': parent_id})
         with database() as db:
-            author = require_author(db)
-            if not db.execute("SELECT 1 FROM post WHERE id = ? AND state = 'published'", (item_id,)).fetchone():
-                abort(404, '这条树洞留言已不可回复')
+            previous = receipt(db, owner, 'comment', request_id, content_hash)
+            if previous is not None:
+                return jsonify(previous)
+            if not db.execute(published_target, target).fetchone():
+                abort(404, '这条留言或回复已不可回复')
         state, reason = moderate_post(body)
         with database() as db:
-            if not db.execute("SELECT 1 FROM post WHERE id = ? AND state = 'published'", (item_id,)).fetchone():
-                abort(409, '原留言状态已变化，请刷新')
-            comment_id = db.execute('''INSERT INTO post_comment(post_id, body, state, reason, day, author)
-                                       VALUES (?, ?, ?, ?, ?, ?)''',
-                                    (item_id, body, state, reason, date.today().isoformat(), author)).lastrowid
+            db.execute('BEGIN IMMEDIATE')
+            previous = receipt(db, owner, 'comment', request_id, content_hash)
+            if previous is not None:
+                return jsonify(previous)
+            inserted = db.execute(f'''INSERT INTO post_comment(post_id, body, state, reason, day, author, parent_comment_id, user_id)
+                SELECT id, ?, ?, ?, ?, '', ?, ? FROM ({published_target})''',
+                (body, state, reason, date.today().isoformat(), parent_id, owner, *target))
+            if not inserted.rowcount:
+                abort(409, '回复对象状态已变化，请刷新')
+            comment_id = inserted.lastrowid
             audit_comment(db, comment_id, item_id, '系统', 'auto', state, reason)
-        return jsonify(id=comment_id, state=state, reason=reason)
+            result = remember(db, owner, 'comment', request_id, content_hash, dict(id=comment_id, state=state, reason=reason))
+        return jsonify(result)
 
     @pages.post('/comments/<int:comment_id>/withdraw')
     def withdraw_comment(comment_id):
+        owner = diary_owner()
         with database() as db:
-            author = require_author(db)
-            row = db.execute('SELECT post_id FROM post_comment WHERE id = ? AND author = ?',
-                             (comment_id, author)).fetchone()
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT post_id FROM post_comment WHERE id = ? AND user_id = ?',
+                             (comment_id, owner)).fetchone()
             if row is None:
                 abort(404, '回复不存在')
             if not db.execute('''UPDATE post_comment SET state = 'withdrawn', reason = '作者撤回'
-                                 WHERE id = ? AND author = ? AND state IN ('pending', 'published')''',
-                              (comment_id, author)).rowcount:
+                                 WHERE id = ? AND user_id = ? AND state IN ('pending', 'published')''',
+                              (comment_id, owner)).rowcount:
                 abort(409, '回复状态已变化，请刷新')
             audit_comment(db, comment_id, row['post_id'], '作者', 'withdraw', 'withdrawn', '作者撤回')
         return jsonify(ok=True)
 
     @pages.post('/posts/<int:item_id>/withdraw')
     def withdraw(item_id):
+        owner = diary_owner()
         with database() as db:
-            author = require_author(db)
-            if not db.execute('SELECT 1 FROM post WHERE id = ? AND author = ?',
-                              (item_id, author)).fetchone():
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM post WHERE id = ? AND user_id = ?',
+                              (item_id, owner)).fetchone():
                 abort(404, '投稿不存在')
             if not db.execute('''UPDATE post SET state = 'withdrawn', reason = '作者撤回'
-                                 WHERE id = ? AND author = ? AND state IN ('pending', 'published')''',
-                              (item_id, author)).rowcount:
+                                 WHERE id = ? AND user_id = ? AND state IN ('pending', 'published')''',
+                              (item_id, owner)).rowcount:
                 abort(409, '稿件状态已变化，请刷新')
             audit(db, item_id, '作者', 'withdraw', 'withdrawn', '作者撤回')
         return jsonify(ok=True)
@@ -257,8 +323,9 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
     def login():
         data = payload()
         supplied = data.get('password')
+        consume_attempt(database, 'reviewer', data.get('username'))
         if (data.get('username') != reviewer_username or not isinstance(supplied, str)
-                or not compare_digest(supplied.encode(), reviewer_password.encode())):
+                or len(supplied) > 128 or not check_password_hash(password_hash, supplied)):
             abort(401, '账号或口令不正确')
         token = token_urlsafe(32)
         now = time()
@@ -270,7 +337,7 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
     def require_reviewer(db):
         scheme, _, token = request.headers.get('Authorization', '').partition(' ')
         if scheme.lower() != 'bearer' or not token:
-            if author_for(db):
+            if request.headers.get('X-Treehole-Token'):
                 abort(403, '当前身份没有树洞审核权限')
             abort(401, '请先登录审核台')
         token_hash = hash_reviewer_token(token)
@@ -316,7 +383,7 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, reviewer_userna
         with database() as db:
             require_reviewer(db)
             return jsonify([dict(row) for row in db.execute('''
-                SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day,
+                SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day, c.parent_comment_id,
                        p.body AS post_body FROM post_comment c
                 JOIN post p ON p.id = c.post_id ORDER BY c.id DESC''')])
 

@@ -29,7 +29,7 @@
           <p v-if="!visible.length" class="panel empty">当前没有稿件。</p>
           <article v-for="item in visible" :key="item.targetType + '-' + item.id" class="panel post">
             <div class="meta"><span class="tag">{{ item.targetType === 'comment' ? '回复' : item.kind }}</span><span>#{{ item.id }} · {{ item.day }}</span><strong>{{ labels[item.state] }}</strong></div>
-            <p v-if="item.targetType === 'comment'" class="reason">回复树洞 #{{ item.post_id }}：{{ item.post_body }}</p>
+            <p v-if="item.targetType === 'comment'" class="reason">{{ item.parent_comment_id ? '回应回复 #' + item.parent_comment_id + ' · ' : '' }}树洞 #{{ item.post_id }}：{{ item.post_body }}</p>
             <p class="body">{{ item.body }}</p>
             <p class="reason">{{ item.reason }}</p>
             <div v-if="item.state === 'pending'" class="actions">

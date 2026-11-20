@@ -1,0 +1,44 @@
+# Replace domain, certificate paths, static directories and VPN CIDR before use.
+# Keep Flask/Waitress and Ollama bound to 127.0.0.1; expose only HTTPS.
+server {
+    listen 80;
+    server_name emotion.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name emotion.example.com;
+    ssl_certificate     F:/secrets/emotion/fullchain.pem;
+    ssl_certificate_key F:/secrets/emotion/privkey.pem;
+    root F:/www/xinyu/client;
+    client_max_body_size 32k;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # The application sees the proxy's loopback address. Enforce the real
+    # reviewer's source IP here; the application does not trust X-Forwarded-For.
+    location ^~ /api/demo/review/ {
+        allow 127.0.0.1;
+        allow 10.8.0.0/24; # Replace with your administrative VPN CIDR.
+        deny all;
+        proxy_set_header Host $host;
+        proxy_pass http://127.0.0.1:5000;
+        proxy_read_timeout 190s;
+    }
+    location /api/ {
+        proxy_set_header Host $host;
+        proxy_pass http://127.0.0.1:5000;
+        proxy_read_timeout 190s;
+    }
+    location ^~ /admin/ {
+        allow 127.0.0.1;
+        allow 10.8.0.0/24;
+        deny all;
+        alias F:/www/xinyu/admin/;
+        try_files $uri $uri/ /admin/index.html;
+    }
+    location / { try_files $uri $uri/ /index.html; }
+    location ~ /\. { deny all; }
+}

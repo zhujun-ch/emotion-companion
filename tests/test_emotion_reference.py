@@ -1,4 +1,5 @@
 import json
+from flask import request
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,10 +55,12 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(result['state'],'ready')
         self.assertEqual(result['label'],'悲伤')
 
-    def test_feedback_snapshot_persistence_and_ownership(self):
+    @patch.object(backend, 'classify_message', side_effect=lambda text, history: ('support', text))
+    @patch.object(backend, 'review_reply', return_value=True)
+    def test_feedback_snapshot_persistence_and_ownership(self, review, classify):
         with tempfile.TemporaryDirectory() as d:
             store=ConversationStore(Path(d)/'db.sqlite3')
-            with patch.object(backend,'conversation_store',store), patch.object(backend,'emotion_reference_policy',policy({t:distribution(2) for t in ['一','二','三','四']})), patch.object(backend,'predict_emotion',return_value=('快乐',.9)), patch.object(backend,'ask_ollama',return_value='在听你说。') as model:
+            with patch.object(backend.account_auth, 'current_user', side_effect=lambda: {'id': request.headers.get('X-Test-User', 'reference_owner')}), patch.object(backend,'conversation_store',store), patch.object(backend,'emotion_reference_policy',policy({t:distribution(2) for t in ['一','二','三','四']})), patch.object(backend,'predict_emotion',return_value=('快乐',.9)), patch.object(backend,'ask_ollama',return_value='在听你说。') as model:
                 c=backend.app.test_client(); user='reference_owner'
                 sid=c.post('/api/sessions',json={'user_id':user}).json['session']['id']
                 for i,text in enumerate(['一','二','三','四'],1):
@@ -68,7 +71,7 @@ class ReferenceTests(unittest.TestCase):
                     self.assertEqual(response.json['emotion_reference']['label'],expected)
                 mid=response.json['assistant_message_id']
                 url=f'/api/messages/{mid}/feedback'
-                self.assertEqual(c.post(url,json={'user_id':'other','agreed':False}).status_code,404)
+                self.assertEqual(c.post(url,headers={'X-Test-User':'other'},json={'agreed':False}).status_code,404)
                 self.assertEqual(c.post(url,json={'user_id':user,'agreed':False,'correction':'抑郁症'}).status_code,400)
                 self.assertEqual(c.post(url,json={'user_id':user,'agreed':'false'}).status_code,400)
                 r=c.post(url,json={'user_id':user,'agreed':False,'correction':'悲伤'})

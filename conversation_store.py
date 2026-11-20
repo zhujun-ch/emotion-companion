@@ -5,6 +5,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from request_dedup import initialize_receipts, receipt, remember
 
 
 class ConversationStore:
@@ -13,6 +14,7 @@ class ConversationStore:
         self.save_emotion_records = save_emotion_records
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            initialize_receipts(db)
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS chat_session (
                     id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
@@ -35,6 +37,10 @@ class ConversationStore:
             columns = {r['name'] for r in db.execute('PRAGMA table_info(chat_message)')}
             if 'emotion_reference' not in columns:
                 db.execute('ALTER TABLE chat_message ADD COLUMN emotion_reference TEXT')
+            if 'chat_route' not in columns:
+                db.execute("ALTER TABLE chat_message ADD COLUMN chat_route TEXT NOT NULL DEFAULT 'support'")
+            if 'model_text' not in columns:
+                db.execute('ALTER TABLE chat_message ADD COLUMN model_text TEXT')
             if save_emotion_records:
                 columns = {r['name'] for r in db.execute('PRAGMA table_info(emotion_record)')}
                 if 'session_id' not in columns:
@@ -55,12 +61,18 @@ class ConversationStore:
     def now():
         return datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
-    def create(self, user_id):
+    def create(self, user_id, request_id=None, content_hash=None):
         now = self.now()
         item = dict(id=uuid.uuid4().hex, user_id=user_id, title='新的倾诉', created_at=now, updated_at=now)
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if request_id:
+                previous = receipt(db, user_id, 'session', request_id, content_hash)
+                if previous is not None:
+                    return previous
             db.execute('INSERT INTO chat_session VALUES (:id, :user_id, :title, :created_at, :updated_at)', item)
-        return {k: v for k, v in item.items() if k != 'user_id'} | {'message_count': 0}
+            result = {k: v for k, v in item.items() if k != 'user_id'} | {'message_count': 0}
+            return remember(db, user_id, 'session', request_id, content_hash, result) if request_id else result
 
     def get(self, session_id, user_id):
         with self.connect() as db:
@@ -77,7 +89,7 @@ class ConversationStore:
 
     def messages(self, session_id):
         with self.connect() as db:
-            rows = db.execute('SELECT * FROM chat_message WHERE session_id=? ORDER BY id', (session_id,)).fetchall()
+            rows = db.execute('SELECT id,session_id,role,content,emotion,confidence,created_at,emotion_reference,chat_route FROM chat_message WHERE session_id=? ORDER BY id', (session_id,)).fetchall()
             feedback = {r['message_id']:dict(r) for r in db.execute('''SELECT f.* FROM emotion_feedback f
                 JOIN chat_message m ON m.id=f.message_id WHERE m.session_id=?''',(session_id,))}
         result = []
@@ -90,8 +102,8 @@ class ConversationStore:
 
     def user_evidence(self, session_id, limit=4):
         with self.connect() as db:
-            rows = db.execute("SELECT content FROM chat_message WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT ?", (session_id,limit)).fetchall()
-            count = db.execute("SELECT COUNT(*) FROM chat_message WHERE session_id=? AND role='user'", (session_id,)).fetchone()[0]
+            rows = db.execute("SELECT COALESCE(model_text, content) AS content FROM chat_message WHERE session_id=? AND role='user' AND chat_route IN ('support', 'mixed') ORDER BY id DESC LIMIT ?", (session_id,limit)).fetchall()
+            count = db.execute("SELECT COUNT(*) FROM chat_message WHERE session_id=? AND role='user' AND chat_route IN ('support', 'mixed')", (session_id,)).fetchone()[0]
         return [r['content'] for r in reversed(rows)], count
 
     def save_feedback(self, message_id, user_id, agreed, correction):
@@ -110,7 +122,9 @@ class ConversationStore:
 
     def context(self, session_id, max_turns=8, char_budget=2400):
         with self.connect() as db:
-            rows = db.execute('SELECT role,content FROM chat_message WHERE session_id=? ORDER BY id DESC LIMIT ?',
+            rows = db.execute("""SELECT role, COALESCE(model_text, content) AS content
+                FROM chat_message WHERE session_id=? AND chat_route NOT IN ('off_topic', 'fallback')
+                ORDER BY id DESC LIMIT ?""",
                               (session_id, max_turns * 2)).fetchall()
         history = [dict(r) for r in reversed(rows)]
         selected = []
@@ -125,28 +139,50 @@ class ConversationStore:
             selected = pair + selected
         return selected
 
-    def save_turn(self, session_id, user_id, text, reply, emotion, confidence, emotion_reference=None):
+    def replay(self, user_id, request_id, content_hash):
+        with self.connect() as db:
+            return receipt(db, user_id, 'chat', request_id, content_hash)
+
+    def save_turn(self, session_id, user_id, text, reply, emotion, confidence, emotion_reference=None, *, chat_route='support', model_text=None,
+                  request_id=None, content_hash=None, response=None, expected_count=None):
         now = self.now()
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if request_id:
+                previous = receipt(db, user_id, 'chat', request_id, content_hash)
+                if previous is not None:
+                    return previous
             row = db.execute('SELECT title FROM chat_session WHERE id=? AND user_id=?', (session_id, user_id)).fetchone()
             if row is None:
                 raise LookupError('Conversation no longer exists')
             count = db.execute('SELECT COUNT(*) FROM chat_message WHERE session_id=?', (session_id,)).fetchone()[0]
-            user_message = db.execute('INSERT INTO chat_message(session_id,role,content,created_at) VALUES (?, ?, ?, ?)',
-                                      (session_id, 'user', text, now))
-            assistant_message = db.execute('''INSERT INTO chat_message(session_id,role,content,emotion,confidence,created_at,emotion_reference)
-                VALUES (?, ?, ?, ?, ?, ?, ?)''', (session_id, 'assistant', reply, emotion, confidence, now,
-                json.dumps(emotion_reference,ensure_ascii=False) if emotion_reference is not None else None))
+            if expected_count is not None and expected_count != count:
+                from flask import abort
+                abort(409, '对话已有新消息，请刷新后重试')
+            user_message = db.execute('INSERT INTO chat_message(session_id,role,content,created_at,chat_route,model_text) VALUES (?, ?, ?, ?, ?, ?)',
+                                      (session_id, 'user', text, now, chat_route, model_text))
+            assistant_message = db.execute('''INSERT INTO chat_message(session_id,role,content,emotion,confidence,created_at,emotion_reference,chat_route)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (session_id, 'assistant', reply, emotion, confidence, now,
+                json.dumps(emotion_reference,ensure_ascii=False) if emotion_reference is not None else None, chat_route))
             title = text[:24] + ('…' if len(text) > 24 else '') if count == 0 else row['title']
             db.execute('UPDATE chat_session SET title=?,updated_at=? WHERE id=?', (title, now, session_id))
-            if self.save_emotion_records:
+            if self.save_emotion_records and chat_route in ('support', 'mixed'):
                 db.execute('''INSERT INTO emotion_record(user_id,user_text,emotion_label,confidence,llm_reply,session_id)
                     VALUES (?,?,?,?,?,?)''', (user_id, text, emotion, confidence, reply, session_id))
+            if request_id:
+                result = response | {'user_message_id': user_message.lastrowid,
+                                     'assistant_message_id': assistant_message.lastrowid}
+                return remember(db, user_id, 'chat', request_id, content_hash, result)
             return user_message.lastrowid, assistant_message.lastrowid
 
     def delete(self, session_id, user_id):
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             deleted = db.execute('DELETE FROM chat_session WHERE id=? AND user_id=?', (session_id, user_id)).rowcount
+            if deleted:
+                db.execute('''DELETE FROM request_receipt WHERE user_id=? AND
+                    ((scope='chat' AND json_extract(response, '$.session_id')=?) OR
+                     (scope='session' AND json_extract(response, '$.id')=?))''', (user_id, session_id, session_id))
             if deleted and self.save_emotion_records:
                 db.execute('DELETE FROM emotion_record WHERE session_id=?', (session_id,))
         return bool(deleted)

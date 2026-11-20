@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from flask import Flask
+from flask import Flask, request, abort
 import requests
 
 from demo_pages import create_demo_pages
@@ -21,15 +21,21 @@ class TreeholeTests(unittest.TestCase):
 
     def open_database(self, password='test-password'):
         app = Flask(__name__)
+        def owner():
+            token = request.headers.get('Authorization', '').removeprefix('Bearer ')
+            if not token.startswith('test-user-'):
+                abort(401, '请先登录')
+            return token
         app.register_blueprint(create_demo_pages(
             self.database, password,
             lambda body: ('published', '自动审核通过') if body == '鼓励测试' else ('pending', '待复核'),
+            diary_owner=owner,
         ))
         return app.test_client()
 
     def new_author(self):
-        token = self.client.post('/api/demo/posts/session').json['token']
-        return {'X-Treehole-Token': token}
+        from uuid import uuid4
+        return {'Authorization': 'Bearer test-user-' + uuid4().hex}
 
     def post(self, body):
         response = self.client.post('/api/demo/posts', json={'kind': '鼓励', 'body': body}, headers=self.author)
@@ -53,7 +59,7 @@ class TreeholeTests(unittest.TestCase):
         url = f'/api/demo/review/posts/{item_id}'
         action = {'action': 'remove', 'reason': '测试下架'}
         self.assertIn(item_id, [row['id'] for row in self.lists(self.other)['public']])
-        self.assertEqual(self.client.post(url, json=action, headers=self.other).status_code, 403)
+        self.assertEqual(self.client.post(url, json=action, headers=self.other).status_code, 401)
         login = self.client.post('/api/demo/review/login', json={'username': 'admin', 'password': 'test-password'})
         reviewer = {'Authorization': 'Bearer ' + login.json['token']}
         self.assertEqual(self.client.post(url, json=action, headers=reviewer).status_code, 200)
@@ -96,7 +102,7 @@ class TreeholeTests(unittest.TestCase):
 
         comment_id = pending.json['id']
         review_url = f'/api/demo/review/comments/{comment_id}'
-        self.assertEqual(self.client.post(review_url, json={'action': 'approve'}, headers=self.other).status_code, 403)
+        self.assertEqual(self.client.post(review_url, json={'action': 'approve'}, headers=self.other).status_code, 401)
         login = self.client.post('/api/demo/review/login', json={'username': 'admin', 'password': 'test-password'})
         reviewer = {'Authorization': 'Bearer ' + login.json['token']}
         self.assertEqual(self.client.post(review_url, json={'action': 'approve'}, headers=reviewer).status_code, 200)
@@ -114,6 +120,33 @@ class TreeholeTests(unittest.TestCase):
                                           json={'action': 'remove'}, headers=reviewer).status_code, 200)
         self.assertNotIn(post_id, [row['id'] for row in self.lists(self.author)['public']])
         self.assertEqual(self.client.post(url, json={'body': '鼓励测试'}, headers=self.other).status_code, 404)
+
+    def test_replies_to_comments_require_a_public_target_under_the_same_post(self):
+        post_id = self.post('鼓励测试')
+        other_post_id = self.post('鼓励测试')
+        url = f'/api/demo/posts/{post_id}/comments'
+        parent_id = self.client.post(url, json={'body': '鼓励测试'}, headers=self.author).json['id']
+        pending_id = self.client.post(url, json={'body': '需要复核'}, headers=self.author).json['id']
+        reply = {'body': '鼓励测试', 'parent_comment_id': parent_id}
+        self.assertEqual(self.client.post(f'/api/demo/posts/{other_post_id}/comments',
+                                          json=reply, headers=self.other).status_code, 404)
+        self.assertEqual(self.client.post(url, json=reply | {'parent_comment_id': pending_id},
+                                          headers=self.other).status_code, 404)
+        nested_id = self.client.post(url, json=reply, headers=self.other).json['id']
+        pending_reply = self.client.post(url, json=reply | {'body': '需要复核'}, headers=self.other)
+        self.assertEqual(pending_reply.json['state'], 'pending')
+
+        def public_comments():
+            return next(row['comments'] for row in self.lists(self.other)['public'] if row['id'] == post_id)
+
+        self.assertEqual([row['id'] for row in public_comments()], [parent_id, nested_id])
+        self.assertEqual(public_comments()[-1]['parent_comment_id'], parent_id)
+        self.assertEqual(public_comments()[-1]['parent_body'], '鼓励测试')
+        self.assertEqual(self.client.post(f'/api/demo/comments/{parent_id}/withdraw',
+                                          headers=self.author).status_code, 200)
+        self.assertEqual(self.client.post(url, json=reply, headers=self.other).status_code, 404)
+        self.assertEqual([row['id'] for row in public_comments()], [nested_id])
+        self.assertIsNone(public_comments()[0]['parent_body'])
 
     def test_reviewer_can_reject_or_remove_replies_without_affecting_parent(self):
         post_id = self.post('鼓励测试')
