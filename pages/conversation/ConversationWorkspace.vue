@@ -13,8 +13,10 @@
           <button v-else class="home-button" @click="openHome">← 返回主页</button>
         </view>
         <view class="header-bottom">
-          <view class="page-subtitle">不急着找到答案，先把心里的话说出来。</view>
-          <view class="memory-pill"><view class="status-dot"></view>{{ turnCount ? '接着刚才的话，继续聊' : '这段对话，会替你留好' }}</view>
+          <button v-if="!account" class="history-toggle" @click="openLogin">登录后同步会话</button>
+          <view v-else class="page-subtitle">不急着找到答案，先把心里的话说出来。</view>
+          <button v-if="account" class="history-toggle" :disabled="isLoading || isInitializing" @click="initialize">刷新会话</button>
+        <view class="memory-pill"><view class="status-dot"></view>{{ turnCount ? '接着刚才的话，继续聊' : '这段对话，会替你留好' }}</view>
         </view>
       </view>
 
@@ -109,6 +111,7 @@
 
 <script setup>
 import { nextTick, onMounted, ref } from 'vue'
+import { account, openLogin } from '../../composables/account'
 import { useConversations } from '../../composables/useConversations'
 defineOptions({ options: { virtualHost: true } })
 const props = defineProps({ embedded: Boolean })

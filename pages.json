@@ -8,6 +8,10 @@
       }
     },
     {
+      "path": "pages/login/index",
+      "style": { "navigationBarTitleText": "心屿账号" }
+    },
+    {
       "path": "pages/classic/index",
       "style": {
         "navigationStyle": "custom",

@@ -54,7 +54,8 @@
       <view class="topbar">
         <view class="breadcrumb">我的小岛 › <text class="active-breadcrumb">{{ sectionTitle }}</text></view>
         <view class="topbar-right">
-          <text class="mode-pill">● 课程演示版</text>
+          <text v-if="account" class="mode-pill"><text @click="openLogin">{{ account.user.username }} · 账号管理</text> · <text @click="logout">退出</text></text>
+          <text v-else class="mode-pill" @click="openLogin">登录 / 注册</text>
         </view>
       </view>
 
@@ -174,8 +175,9 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { onLoad, onShow } from '@dcloudio/uni-app'
+import { account, openLogin, signOut } from '../../composables/account'
 import { useConversations } from '../../composables/useConversations'
 import IslandSections from '../island/IslandSections.vue'
 import ConversationWorkspace from '../conversation/ConversationWorkspace.vue'
@@ -187,8 +189,14 @@ const sectionTitle = computed(() => ({ board: '情绪看板', diary: '心情日�
 onLoad(options => {
   if (options?.mode === 'board' || options?.mode === 'diary') section.value = options.mode
 })
-onShow(() => islandSections.value?.refresh())
-onMounted(initialize)
+onShow(() => {
+  initialize()
+  islandSections.value?.refresh()
+})
+async function logout() {
+  try { await signOut() }
+  catch (e) { uni.showToast({ title: e.message, icon: 'none' }) }
+}
 function showChat(prefill) {
   if (typeof prefill === 'string') chooseMood(prefill)
   section.value = 'chat'

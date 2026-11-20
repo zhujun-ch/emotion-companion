@@ -2,35 +2,18 @@ import { ref } from 'vue'
 import { demoRequest } from './demoPages'
 
 const AUTHOR_KEY = 'xinyu-treehole-author'
-let authorToken = uni.getStorageSync(AUTHOR_KEY)
-let authorRequest
+export const hasLegacyPosts = ref(Boolean(uni.getStorageSync(AUTHOR_KEY)))
 
-async function getAuthorToken() {
-  if (authorToken) return authorToken
-  authorRequest ||= demoRequest('/posts/session', 'POST').then(({ token }) => {
-    uni.setStorageSync(AUTHOR_KEY, token)
-    authorToken = token
-    return token
-  }).finally(() => { authorRequest = undefined })
-  return authorRequest
+export async function claimLegacyPosts() {
+  const legacyToken = uni.getStorageSync(AUTHOR_KEY)
+  const result = await demoRequest('/posts/claim', 'POST', {}, { header: { 'X-Treehole-Token': legacyToken } })
+  uni.removeStorageSync(AUTHOR_KEY)
+  hasLegacyPosts.value = false
+  return result
 }
 
 export async function treeholeRequest(path, method = 'GET', data) {
-  const send = token => demoRequest(path, method, data, {
-    header: { 'X-Treehole-Token': token },
-    timeout: 25000,
-  })
-  const token = await getAuthorToken()
-  try {
-    return await send(token)
-  } catch (failure) {
-    if (failure.statusCode !== 401) throw failure
-    if (authorToken === token) {
-      authorToken = ''
-      uni.removeStorageSync(AUTHOR_KEY)
-    }
-    return send(await getAuthorToken())
-  }
+  return demoRequest(path, method, data, { timeout: 25000 })
 }
 
 export const reviewerToken = ref('')

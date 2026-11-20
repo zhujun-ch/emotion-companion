@@ -18,7 +18,15 @@
       <view v-if="error" class="island-error">{{ error }} <text @click="refresh">重新加载</text></view>
       <view v-if="loading" class="island-empty">正在加载…</view>
 
-      <template v-if="mode === 'diary'">
+      <view v-if="mode === 'diary'" class="island-card diary-encouragement">
+        <text class="island-meta">给自己的一句话</text>
+        <view>{{ encouragements[encouragementIndex] }}</view>
+      </view>
+
+      <view v-if="mode !== 'treehole' && !account" class="island-card">
+        <button class="island-primary" @click="openLogin">登录后查看日记和看板</button>
+      </view>
+      <template v-else-if="mode === 'diary'">
         <view class="island-card diary-editor">
           <view class="island-card-title">{{ editingId ? '编辑日记' : '记下今天的感受' }}</view>
           <picker mode="date" :value="diary.day" @change="diary.day = $event.detail.value">
@@ -50,6 +58,14 @@
         @open-chat="startChat" @open-diary="selectMode('diary')" />
 
       <template v-else>
+        <view class="island-card">
+          <text>投稿和回复公开匿名展示，登录后可跨端查看本人记录。</text>
+          <button v-if="!account" @click="openLogin">登录 / 注册</button>
+          <template v-else-if="hasLegacyPosts">
+            <view>本设备保留了旧投稿凭据，可将历史投稿关联至 {{ account.user.username }}，关联后不能转移。</view>
+            <button :disabled="busy" @click="claimHistory">关联本设备历史投稿</button>
+          </template>
+        </view>
         <view class="island-card">
           <view class="island-card-title">写给树洞</view>
           <view class="island-chips">
@@ -93,9 +109,9 @@
         </template>
         <template v-else>
           <view v-if="!visiblePosts.length && !loading" class="island-empty">这里暂时没有留言。</view>
-          <view v-for="item in visiblePosts" :key="item.id" class="island-card island-entry">
+          <view v-for="item in visiblePosts" :key="(item.targetType || 'post') + '-' + item.id" class="island-card island-entry">
             <view class="island-meta"><text class="island-tag">{{ item.targetType === 'comment' ? '回复' : item.kind }}</text> {{ feedTab === 'public' ? '匿名留言' : states[item.state] }} · {{ item.day }}</view>
-            <view v-if="item.targetType === 'comment'" class="island-parent">回复树洞 #{{ item.post_id }}：{{ item.post_body }}</view>
+            <view v-if="item.targetType === 'comment'" class="island-parent">{{ item.parent_comment_id ? '回应回复 #' + item.parent_comment_id : '回复树洞 #' + item.post_id }} · {{ item.post_body }}</view>
             <view class="island-body">{{ item.body }}</view>
             <view v-if="feedTab === 'mine'" class="island-actions">
               <text>{{ item.reason }}</text>
@@ -106,11 +122,16 @@
                 <view class="island-meta">回复 · {{ item.comments?.length || 0 }}</view>
                 <view v-for="comment in item.comments || []" :key="comment.id" class="island-comment">
                   <view class="island-meta">匿名回复 · {{ comment.day }}</view>
+                  <view v-if="comment.parent_comment_id" class="island-parent">
+                    {{ comment.parent_body ? '回应：' + comment.parent_body : '回应的原回复已不可见' }}
+                  </view>
                   <view class="island-body">{{ comment.body }}</view>
+                  <button :disabled="busy" @click="openReply(item.id, comment)">回复</button>
                   <button v-if="reviewerToken" class="island-danger" :disabled="busy" @click="prepareReview(comment.id, 'remove', 'comment')">下架回复</button>
                 </view>
-                <button v-if="replyTarget !== item.id" :disabled="busy" @click="openReply(item.id)">回复这条树洞</button>
+                <button v-if="replyTarget?.postId !== item.id" :disabled="busy" @click="openReply(item.id)">回复这条树洞</button>
                 <view v-else class="island-reply-form">
+                  <view v-if="replyTarget.comment" class="island-parent">正在回应：{{ replyTarget.comment.body }}</view>
                   <textarea :value="replyBody" @input="updateReplyBody" class="island-textarea" maxlength="300" placeholder="匿名留下鼓励或想说的话，回复同样会先审核。" />
                   <view class="island-actions">
                     <text>{{ submittingReply ? '正在审核，请稍等…' : replyBody.length + ' / 300' }}</text>
@@ -128,7 +149,10 @@
               <button class="island-danger" :disabled="busy" @click="prepareReview(item.id, 'reject', item.targetType)">驳回</button>
               <button class="island-primary" :disabled="busy" @click="applyReview(item.id, 'approve', '', item.targetType)">通过并发布</button>
             </view>
-            <view v-if="reviewTarget?.id === item.id" class="island-review-form">
+            <view v-if="reviewTarget && (
+              (reviewTarget.type === (item.targetType || 'post') && reviewTarget.id === item.id) ||
+              (feedTab === 'public' && reviewTarget.type === 'comment' && item.comments?.some(comment => comment.id === reviewTarget.id))
+            )" class="island-review-form">
               <view class="island-meta">{{ reviewTarget.action === 'reject' ? '驳回' : '下架' }}{{ reviewTarget.type === 'comment' ? '回复' : '留言' }} #{{ reviewTarget.id }}</view>
               <input v-model="reviewReason" class="island-review-input" maxlength="120" placeholder="填写处理原因" />
               <view class="island-actions">
@@ -144,9 +168,10 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { account, openLogin } from '../../composables/account'
 import { beijingDay, demoRequest } from '../../composables/demoPages'
-import { reviewerToken, reviewRequest, treeholeRequest } from '../../composables/treehole'
+import { reviewerToken, reviewRequest, treeholeRequest, hasLegacyPosts, claimLegacyPosts } from '../../composables/treehole'
 import { useConversations } from '../../composables/useConversations'
 import MoodDashboard from './MoodDashboard.vue'
 
@@ -168,6 +193,27 @@ const kinds = ['鼓励', '倾诉']
 const states = { pending: '待人工审核', blocked: '未通过自动检查', published: '已发布', rejected: '已驳回', removed: '已下架', withdrawn: '已撤回' }
 const mode = ref(normalizeMode(props.initialMode))
 const area = computed(() => areas[mode.value])
+const encouragements = [
+  '先完成眼前的一小步，也是在向前走。',
+  '累了可以歇一会儿，休息也是照顾自己。',
+  '今天有一点进展，就值得记下来。',
+  '有些事需要时间，你可以按自己的节奏来。',
+  '把今天的感受写下来，就是在认真对待自己。',
+  '能开口求助，也是一种勇气。',
+]
+const encouragementIndex = ref(Math.floor(Math.random() * encouragements.length))
+let encouragementTimer
+function rotateEncouragement() {
+  const offset = 1 + Math.floor(Math.random() * (encouragements.length - 1))
+  encouragementIndex.value = (encouragementIndex.value + offset) % encouragements.length
+}
+watch(mode, (next, previous) => {
+  clearInterval(encouragementTimer)
+  if (next !== 'diary') return
+  if (previous) rotateEncouragement()
+  encouragementTimer = setInterval(rotateEncouragement, 60000)
+}, { immediate: true })
+onUnmounted(() => clearInterval(encouragementTimer))
 const diaries = ref([])
 const posts = ref({ public: [], mine: [] })
 const feedTab = ref('public')
@@ -212,6 +258,14 @@ watch(() => props.initialMode, requested => {
   mode.value = normalizeMode(requested)
   refresh()
 })
+watch(account, () => {
+  diaries.value = []
+  posts.value = { public: [], mine: [], mine_comments: [] }
+  post.value.body = ''
+  closeReply()
+  resetDiary()
+  refresh()
+})
 onMounted(refresh)
 defineExpose({ refresh })
 
@@ -225,6 +279,10 @@ async function refresh() {
   const tab = feedTab.value
   loading.value = true
   error.value = ''
+  if (selected !== 'treehole' && !account.value) {
+    loading.value = false
+    return
+  }
   try {
     if (selected === 'treehole') {
       const updatedPosts = await treeholeRequest('/posts')
@@ -316,6 +374,7 @@ function updatePostBody(event) {
   post.value.body = event.detail.value
 }
 async function submitPost() {
+  if (!account.value) return openLogin()
   if (!canSubmitPost.value) return
   const { kind, body } = post.value
   submittingPost.value = true
@@ -334,11 +393,19 @@ async function submitPost() {
 function withdraw(id) {
   return mutate(() => treeholeRequest('/posts/' + id + '/withdraw', 'POST'))
 }
+function claimHistory() {
+  return mutate(async () => {
+    await claimLegacyPosts()
+    feedTab.value = 'mine'
+    uni.showToast({ title: '历史投稿已关联至当前账号', icon: 'none' })
+  })
+}
 function withdrawComment(id) {
   return mutate(() => treeholeRequest('/comments/' + id + '/withdraw', 'POST'))
 }
-function openReply(id) {
-  replyTarget.value = id
+function openReply(postId, comment = null) {
+  if (!account.value) return openLogin()
+  replyTarget.value = { postId, comment }
   replyBody.value = ''
 }
 function closeReply() {
@@ -349,12 +416,13 @@ function updateReplyBody(event) {
   replyBody.value = event.detail.value
 }
 async function submitReply(id) {
-  if (busy.value || replyTarget.value !== id || !replyBody.value.trim()) return
+  if (busy.value || replyTarget.value?.postId !== id || !replyBody.value.trim()) return
   const body = replyBody.value.trim()
+  const parentCommentId = replyTarget.value.comment?.id ?? null
   submittingReply.value = true
   try {
     await mutate(async () => {
-      const result = await treeholeRequest('/posts/' + id + '/comments', 'POST', { body })
+      const result = await treeholeRequest('/posts/' + id + '/comments', 'POST', { body, parent_comment_id: parentCommentId })
       closeReply()
       if (result.state !== 'published') feedTab.value = 'mine'
       uni.showToast({ title: states[result.state], icon: 'none' })
@@ -364,6 +432,7 @@ async function submitReply(id) {
   }
 }
 function setFeedTab(tab) {
+  if (tab === 'mine' && !account.value) return openLogin()
   if (busy.value || feedTab.value === tab) return
   feedTab.value = tab
   reviewTarget.value = null
@@ -444,6 +513,7 @@ function applyReview(id, action, reason = '', type = 'post') {
 .island-tag { display: inline-block; background: #eaf2e4; padding: 4px 8px; border-radius: 7px; margin-right: 4px; }
 .island-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 10px; font-size: 15px; line-height: 1.6; }
 .island-parent { color: #597062; font-size: 12px; margin-top: 10px; padding: 9px; background: #f3f6ef; border-radius: 8px; overflow-wrap: anywhere; }
+.diary-encouragement { background: #eef4e8; line-height: 1.6; }
 .island-comments { border-top: 1px solid #edf2e8; margin-top: 18px; padding-top: 13px; }
 .island-comment { border-left: 3px solid #dce9d8; margin: 12px 0; padding: 3px 0 8px 12px; }
 .island-comment .island-body { margin: 5px 0 8px; font-size: 14px; }

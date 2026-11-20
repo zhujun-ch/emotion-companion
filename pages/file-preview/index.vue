@@ -175,6 +175,7 @@
 
 <script setup>
 import { ref, computed, nextTick, onUnmounted } from 'vue'
+import { account, accountHeaders, clearAccount, openLogin } from '../../composables/account'
 
 /* ============ 配置 ============ */
 // 真机调试时，把 .env 中的 VITE_API_BASE 改成电脑局域网 IP，例如 http://192.168.1.10:5000
@@ -219,17 +220,6 @@ const greeting = computed(() => {
   return '晚上好'
 })
 
-// 用户 ID：首次生成并持久化，避免所有人共用同一个 ID
-const getUserId = () => {
-  let id = uni.getStorageSync('xinyu_user_id')
-  if (!id) {
-    id = 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-    uni.setStorageSync('xinyu_user_id', id)
-  }
-  return id
-}
-const userId = getUserId()
-
 /* ============ 聊天逻辑 ============ */
 const pushMessage = (msg) => {
   messages.value.push({ id: ++msgSeq, ...msg })
@@ -270,6 +260,8 @@ const onKeydown = (e) => {
 
 const sendMessage = () => {
   if (!canSend.value) return
+  if (!account.value) return openLogin()
+  const token = account.value.token
   const text = inputText.value.trim()
 
   pushMessage({ role: 'user', content: text })
@@ -280,8 +272,11 @@ const sendMessage = () => {
     url: `${API_BASE}/api/chat`,
     method: 'POST',
     timeout: REQUEST_TIMEOUT,
-    data: { user_id: userId, text },
+    header: accountHeaders(),
+    data: { text },
     success: (res) => {
+      if (token !== account.value?.token) return
+      if (res.statusCode === 401) clearAccount()
       const data = res.data || {}
       if (res.statusCode === 200 && data.status === 'success') {
         pushMessage({ role: 'ai', content: data.reply, emotion: data.emotion_label })

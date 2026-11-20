@@ -1,14 +1,10 @@
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
+import { account, accountHeaders, clearAccount, openLogin } from './account'
+import { pendingWrite } from './requestIds'
 
 const API = import.meta.env?.VITE_API_BASE || 'http://127.0.0.1:5000'
-const USER_KEY = 'xinyu-local-user'
-const SESSION_KEY = 'xinyu-active-session'
-let userId = uni.getStorageSync(USER_KEY)
-if (!userId) {
-  userId = `local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`
-  uni.setStorageSync(USER_KEY, userId)
-}
-const activeSessionId = ref(uni.getStorageSync(SESSION_KEY) || '')
+const sessionKey = () => 'xinyu-active-session:' + account.value?.user.id
+const activeSessionId = ref(account.value ? uni.getStorageSync(sessionKey()) || '' : '')
 const sessions = ref([])
 const messages = ref([])
 const inputText = ref('')
@@ -18,17 +14,36 @@ const error = ref('')
 const scrollTop = ref(0)
 const scrollAnchor = ref('')
 let initialization
+watch(account, () => {
+  initialization = undefined
+  activeSessionId.value = account.value ? uni.getStorageSync(sessionKey()) || '' : ''
+  sessions.value = []
+  messages.value = []
+  inputText.value = ''
+  error.value = ''
+  isInitializing.value = false
+}, { flush: 'sync' })
 const activeTitle = computed(() => sessions.value.find(s => s.id === activeSessionId.value)?.title || '新的倾诉')
 const latestReferenceMessage = computed(() => messages.value.slice().reverse().find(message => message.role === 'ai'))
 const isFeedbackSaving = ref(false)
 const turnCount = computed(() => messages.value.filter(m => m.role === 'ai' && !m.failed).length)
 
 function api(path, method = 'GET', data = {}) {
+  const token = account.value?.token
+  const pending = method === 'POST' && ['/api/chat', '/api/sessions'].includes(path)
+    ? pendingWrite(account.value?.user.id, path, data) : null
   return new Promise((resolve, reject) => {
     uni.request({
-      url: API + path, method, data: { ...data, user_id: userId }, timeout: 180000,
-      success: res => res.statusCode >= 200 && res.statusCode < 300 && res.data.status === 'success'
-        ? resolve(res.data) : reject(new Error(res.data?.msg || '请求失败，请稍后重试。')),
+      url: API + path, method, data: pending?.data || data, header: accountHeaders(), timeout: 180000,
+      success: res => {
+        if (token !== account.value?.token) return reject(new Error('登录状态已变更'))
+        if (res.statusCode === 401) clearAccount()
+        if (res.statusCode >= 200 && res.statusCode < 300 && res.data.status === 'success') {
+          pending?.complete()
+          resolve(res.data)
+        }
+        else reject(new Error(res.data?.msg || '请求失败，请稍后重试。'))
+      },
       fail: failure => {
         const detail = failure?.errMsg || '网络请求失败'
         // #ifdef MP-WEIXIN
@@ -45,7 +60,7 @@ function api(path, method = 'GET', data = {}) {
 }
 function rememberSession(id) {
   activeSessionId.value = id
-  uni.setStorageSync(SESSION_KEY, id)
+  uni.setStorageSync(sessionKey(), id)
 }
 async function refreshSessions() {
   sessions.value = (await api('/api/sessions')).sessions
@@ -78,6 +93,7 @@ async function createSession() {
   error.value = ''
 }
 async function clearChat() {
+  if (!account.value) return openLogin()
   if (isLoading.value || isInitializing.value) return
   isInitializing.value = true
   try {
@@ -87,36 +103,46 @@ async function clearChat() {
   finally { isInitializing.value = false }
 }
 async function initialize() {
+  if (!account.value || isLoading.value || (isInitializing.value && !initialization)) return
   if (initialization) return initialization
+  const token = account.value.token
   initialization = (async () => {
     isInitializing.value = true
     try {
       await refreshSessions()
       const selected = sessions.value.find(s => s.id === activeSessionId.value) || sessions.value[0]
       if (selected) await loadSession(selected.id, false)
-      else rememberSession('')
+      else { rememberSession(''); messages.value = [] }
     } catch (e) {
-      error.value = e.message
-      initialization = undefined
-    } finally { isInitializing.value = false }
+      if (token === account.value?.token) error.value = e.message
+    } finally {
+      if (token === account.value?.token) {
+        isInitializing.value = false
+        initialization = undefined
+      }
+    }
   })()
   return initialization
 }
 async function sendMessage() {
+  if (!account.value) return openLogin()
   const text = inputText.value.trim()
   if (!text || isLoading.value || isInitializing.value) return
   inputText.value = ''
   await sendText(text)
 }
-async function sendText(text) {
+async function sendText(text, requestId) {
+  const token = account.value?.token
   isLoading.value = true
   error.value = ''
   const userMessage = { id: `pending-${Date.now()}`, role: 'user', content: text, pending: true }
   try {
     if (!activeSessionId.value) await createSession()
+    const payload = { session_id: activeSessionId.value, text }
+    userMessage.requestId = requestId || pendingWrite(account.value?.user.id, '/api/chat', payload).data.request_id
     messages.value.push(userMessage)
     scrollToBottom()
-    const result = await api('/api/chat', 'POST', { session_id: activeSessionId.value, text })
+    const result = await api('/api/chat', 'POST', { ...payload, request_id: userMessage.requestId })
     const bubble = messages.value.find(m => m.id === userMessage.id)
     if (bubble) { bubble.pending = false; bubble.id = result.user_message_id }
     messages.value.push({ id: result.assistant_message_id, role: 'ai', content: result.reply,
@@ -124,6 +150,7 @@ async function sendText(text) {
     scrollToBottom()
     try { await refreshSessions() } catch (_) { /* The reply and record have already succeeded. */ }
   } catch (e) {
+    if (token !== account.value?.token) return
     error.value = e.message
     const bubble = messages.value.find(m => m.id === userMessage.id)
     if (bubble) { bubble.pending = false; bubble.failed = true }
@@ -133,9 +160,9 @@ async function sendText(text) {
 async function retry() {
   if (isLoading.value || isInitializing.value) return
   const failed = messages.value.slice().reverse().find(m => m.role === 'user' && m.failed)
-  if (!failed) { initialization = undefined; return initialize() }
+  if (!failed) return initialize()
   messages.value = messages.value.filter(m => m.id !== failed.id)
-  await sendText(failed.content)
+  await sendText(failed.content, failed.requestId)
 }
 function deleteSession(id) {
   if (isLoading.value || isInitializing.value) return
@@ -145,7 +172,7 @@ function deleteSession(id) {
       if (!result.confirm || isLoading.value || isInitializing.value) return
       isInitializing.value = true
       try {
-        await api(`/api/sessions/${id}?user_id=${encodeURIComponent(userId)}`, 'DELETE')
+        await api(`/api/sessions/${id}`, 'DELETE')
         await refreshSessions()
         if (activeSessionId.value === id) {
           if (sessions.value.length) await loadSession(sessions.value[0].id)
