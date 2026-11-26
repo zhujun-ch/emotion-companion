@@ -52,9 +52,12 @@
             <button :disabled="busy" @click="deleteDiary(entry.id)">删除</button>
           </view>
         </view>
+        <view v-if="hasMoreDiaries" class="island-actions">
+          <button :disabled="loadingMore || busy" @click="loadMoreDiaries">{{ loadingMore ? '加载中…' : '加载更多日记' }}</button>
+        </view>
       </template>
 
-      <MoodDashboard v-else-if="mode === 'board'" :diaries="diaries" :moods="moods" :ready="!loading && !error"
+      <MoodDashboard v-else-if="mode === 'board'" :diaries="diaries" :moods="moods" :chat-stats="chatEmotionStats" :ready="!loading && !error"
         @open-chat="startChat" @open-diary="selectMode('diary')" />
 
       <template v-else>
@@ -101,10 +104,13 @@
         </view>
         <template v-if="feedTab === 'audit' && reviewerToken">
           <view v-if="!reviewHistory.length && !loading" class="island-empty">暂无处理记录。</view>
-          <view v-for="entry in reviewHistory" :key="entry.id" class="island-card island-entry">
+          <view v-for="entry in reviewHistory" :key="entry.target_type + '-' + entry.id" class="island-card island-entry">
             <view class="island-meta">{{ entry.target_type === 'comment' ? '回复 #' + entry.comment_id + ' · 树洞 #' + entry.post_id : '树洞 #' + entry.post_id }} · {{ auditActions[entry.action] }} · {{ entry.actor }}</view>
             <view class="island-body">{{ states[entry.state] }} · {{ entry.reason }}</view>
-            <view class="island-meta">{{ entry.created_at }} UTC</view>
+            <view class="island-meta">{{ formatAuditTime(entry.created_at) }}</view>
+          </view>
+          <view v-if="feedTab === 'public' && publicHasMore" class="island-actions">
+            <button :disabled="loadingMore || busy" @click="loadMorePublicPosts">{{ loadingMore ? '加载中…' : '加载更多留言' }}</button>
           </view>
         </template>
         <template v-else>
@@ -161,6 +167,9 @@
               </view>
             </view>
           </view>
+          <view v-if="feedTab === 'public' && publicHasMore" class="island-actions">
+            <button :disabled="loadingMore || busy" @click="loadMorePublicPosts">{{ loadingMore ? '加载中…' : '加载更多留言' }}</button>
+          </view>
         </template>
       </template>
     </view>
@@ -178,10 +187,10 @@ import MoodDashboard from './MoodDashboard.vue'
 defineOptions({ options: { virtualHost: true } })
 const props = defineProps({ initialMode: String, embedded: Boolean })
 const emit = defineEmits(['change-mode', 'open-chat'])
-const { openConversation } = useConversations()
+const { openConversation, fetchEmotionStats } = useConversations()
 const areas = {
   diary: { title: '心情日记', english: 'JOURNAL', description: '留一点时间，把今天的感受写下来。演示请使用虚构内容。' },
-  board: { title: '情绪看板', english: 'MOOD OVERVIEW', description: '看看自己记下了哪些感受。统计来自日记里的自填心情。' },
+  board: { title: '情绪看板', english: 'MOOD OVERVIEW', description: '看看自己记下了哪些感受。支持查看心情日记与对话情绪统计。' },
   treehole: { title: '情绪树洞', english: 'TREE HOLE', description: '在这里匿名留下一段话。请勿填写联系方式或可识别身份的信息。' },
 }
 let platform = '网页客户端'
@@ -215,7 +224,8 @@ watch(mode, (next, previous) => {
 }, { immediate: true })
 onUnmounted(() => clearInterval(encouragementTimer))
 const diaries = ref([])
-const posts = ref({ public: [], mine: [] })
+const chatEmotionStats = ref(null)
+const posts = ref({ public: [], mine: [], mine_comments: [] })
 const feedTab = ref('public')
 const showReviewerLogin = ref(false)
 const reviewerName = ref('admin')
@@ -225,12 +235,18 @@ const reviewHistory = ref([])
 const reviewTarget = ref(null)
 const reviewReason = ref('')
 const auditActions = { auto: '自动审核', approve: '通过', reject: '驳回', remove: '下架', withdraw: '撤回' }
+function formatAuditTime(value) {
+  if (!value) return ''
+  const iso = value.includes('T') ? value : value.replace(' ', 'T') + 'Z'
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
 const visiblePosts = computed(() => {
   if (feedTab.value === 'pending') return pendingPosts.value
   if (feedTab.value === 'mine') return [
     ...posts.value.mine.map(item => ({ ...item, targetType: 'post' })),
     ...(posts.value.mine_comments || []).map(item => ({ ...item, targetType: 'comment' })),
-  ].sort((a, b) => b.id - a.id)
+  ].sort((a, b) => (b.created_at || b.day || '').localeCompare(a.created_at || a.day || '') || (b.id - a.id))
   return posts.value.public
 })
 watch(reviewerToken, token => {
@@ -249,6 +265,11 @@ const replyBody = ref('')
 const submittingReply = ref(false)
 const error = ref('')
 const loading = ref(false)
+const loadingMore = ref(false)
+const hasMoreDiaries = ref(false)
+const nextDiaryOffset = ref(null)
+const publicHasMore = ref(false)
+const publicNextBeforeId = ref(null)
 const busy = ref(false)
 const submittingPost = ref(false)
 const canSubmitPost = computed(() => !busy.value && post.value.body.trim().length > 0)
@@ -258,12 +279,19 @@ watch(() => props.initialMode, requested => {
   mode.value = normalizeMode(requested)
   refresh()
 })
-watch(account, () => {
+watch(account, (next, prev) => {
   diaries.value = []
+  chatEmotionStats.value = null
   posts.value = { public: [], mine: [], mine_comments: [] }
-  post.value.body = ''
-  closeReply()
-  resetDiary()
+  hasMoreDiaries.value = false
+  nextDiaryOffset.value = null
+  publicHasMore.value = false
+  publicNextBeforeId.value = null
+  if (prev?.user?.id && prev.user.id !== next?.user?.id) {
+    post.value.body = ''
+    closeReply()
+    resetDiary()
+  }
   refresh()
 })
 onMounted(refresh)
@@ -285,9 +313,11 @@ async function refresh() {
   }
   try {
     if (selected === 'treehole') {
-      const updatedPosts = await treeholeRequest('/posts')
+      const updatedPosts = await treeholeRequest('/posts?limit=30')
       if (refreshId !== latestRefresh) return
       posts.value = updatedPosts
+      publicHasMore.value = Boolean(updatedPosts.public_has_more)
+      publicNextBeforeId.value = updatedPosts.public_next_before_id ?? null
       if (reviewerToken.value && tab === 'pending') {
         const [reviewed, comments] = await Promise.all([reviewRequest('/posts'), reviewRequest('/comments')])
         if (refreshId === latestRefresh) pendingPosts.value = [
@@ -299,14 +329,60 @@ async function refresh() {
         const history = await reviewRequest('/history')
         if (refreshId === latestRefresh) reviewHistory.value = history
       }
+    } else if (selected === 'board') {
+      const [updatedDiaries, stats] = await Promise.all([
+        demoRequest('/diaries?limit=500&from_day=' + beijingDay(-89)),
+        fetchEmotionStats(90, 200),
+      ])
+      if (refreshId === latestRefresh) {
+        diaries.value = updatedDiaries
+        chatEmotionStats.value = stats
+      }
     } else {
-      const updatedDiaries = await demoRequest('/diaries')
-      if (refreshId === latestRefresh) diaries.value = updatedDiaries
+      const { data: updatedDiaries, hasMore, nextOffset } = await demoRequest('/diaries?limit=20&offset=0', 'GET', undefined, { withMeta: true })
+      if (refreshId === latestRefresh) {
+        diaries.value = updatedDiaries
+        hasMoreDiaries.value = hasMore
+        nextDiaryOffset.value = nextOffset
+      }
     }
   } catch (failure) {
     if (refreshId === latestRefresh) error.value = failure.message
   } finally {
     if (refreshId === latestRefresh) loading.value = false
+  }
+}
+async function loadMoreDiaries() {
+  if (loadingMore.value || !hasMoreDiaries.value || nextDiaryOffset.value == null) return
+  loadingMore.value = true
+  try {
+    const { data, hasMore, nextOffset } = await demoRequest(`/diaries?limit=20&offset=${nextDiaryOffset.value}`, 'GET', undefined, { withMeta: true })
+    const seen = new Set(diaries.value.map(item => item.id))
+    diaries.value = [...diaries.value, ...data.filter(item => !seen.has(item.id))]
+    hasMoreDiaries.value = hasMore
+    nextDiaryOffset.value = nextOffset
+  } catch (failure) {
+    error.value = failure.message
+  } finally {
+    loadingMore.value = false
+  }
+}
+async function loadMorePublicPosts() {
+  if (loadingMore.value || !publicHasMore.value || !publicNextBeforeId.value) return
+  loadingMore.value = true
+  try {
+    const older = await treeholeRequest(`/posts?limit=30&before_id=${publicNextBeforeId.value}`)
+    const seen = new Set(posts.value.public.map(item => item.id))
+    posts.value = {
+      ...posts.value,
+      public: [...posts.value.public, ...older.public.filter(item => !seen.has(item.id))],
+    }
+    publicHasMore.value = Boolean(older.public_has_more)
+    publicNextBeforeId.value = older.public_next_before_id ?? null
+  } catch (failure) {
+    error.value = failure.message
+  } finally {
+    loadingMore.value = false
   }
 }
 function selectTab(event) {
@@ -318,8 +394,13 @@ function selectMode(key) {
     emit('change-mode', key)
     return
   }
-  mode.value = key
-  refresh()
+  uni.redirectTo({
+    url: `/pages/index/index?mode=${key}`,
+    fail: () => {
+      mode.value = key
+      refresh()
+    },
+  })
 }
 function startChat() {
   if (props.embedded) emit('open-chat')

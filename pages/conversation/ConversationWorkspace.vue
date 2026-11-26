@@ -29,10 +29,13 @@
               <view class="island-scene"><view class="sun"></view><view class="water water-one"></view><view class="water water-two"></view><view class="island"></view><view class="tree-trunk"></view><view class="tree-leaf leaf-one"></view><view class="tree-leaf leaf-two"></view></view>
               <view class="welcome-eyebrow">每一种感受，都有它的位置</view>
               <view class="welcome-title">今天，心里是什么天气？</view>
-              <view class="welcome-description">一件开心的小事，一点说不出的疲惫，<br />或者只是想有人陪着说说话。</view>
+              <view class="welcome-description">{{ '一件开心的小事，一点说不出的疲惫，\n或者只是想有人陪着说说话。' }}</view>
               <view class="prompt-list"><button v-for="prompt in prompts" :key="prompt" @click="usePrompt(prompt)">{{ prompt }} <text>↗</text></button></view>
             </view>
             <view v-else class="message-list">
+              <view v-if="hasMoreMessages" class="load-more-wrap">
+                <button class="load-more-btn" :disabled="isLoadingMoreMessages" @click="loadOlderMessages">{{ isLoadingMoreMessages ? '加载中…' : '加载更早消息' }}</button>
+              </view>
               <view class="conversation-note">这是一段只属于此刻的对话</view>
               <view v-for="message in messages" :key="message.id" class="message-row" :class="message.role === 'user' ? 'from-user' : 'from-companion'">
                 <view v-if="message.role === 'ai'" class="avatar message-avatar">屿</view>
@@ -50,13 +53,16 @@
             <button class="new-session" :disabled="isLoading || isInitializing" @click="startNewConversation"><text>＋</text> 开启一段新的倾诉</button>
             <view class="history-heading"><text>聊过的心事</text><text>{{ sessions.length }}</text></view>
             <scroll-view class="session-list" scroll-y>
-              <view v-if="!sessions.length" class="history-empty">还没有聊过的心事。<br />从今天的一件小事开始吧。</view>
+              <view v-if="!sessions.length" class="history-empty">{{ '还没有聊过的心事。\n从今天的一件小事开始吧。' }}</view>
               <view v-for="session in sessions" :key="session.id" class="session-row" :class="{ selected: activeSessionId === session.id }">
                 <button class="session-open" :disabled="isLoading || isInitializing" @click="openHistorySession(session.id)">
                   <view class="session-title">{{ session.title }}</view>
                   <view class="session-sub">{{ formatDate(session.updated_at) }}<text> · {{ Math.floor(session.message_count / 2) }} 轮对话</text></view>
                 </button>
                 <button class="session-delete" :disabled="isLoading || isInitializing" @click.stop="deleteSession(session.id)" aria-label="删除对话">×</button>
+              </view>
+              <view v-if="hasMoreSessions" class="load-more-wrap">
+                <button class="load-more-btn" :disabled="isLoadingMoreSessions" @click="loadMoreSessions">{{ isLoadingMoreSessions ? '加载中…' : '加载更多会话' }}</button>
               </view>
             </scroll-view>
           </view>
@@ -102,7 +108,7 @@
             />
             <view class="composer-footer"><text v-if="isLoading" class="draft-hint">可以继续输入，回复后发送</text><text v-else class="keyboard-hint">Enter 发送 · Shift + Enter 换行</text><view class="send-actions"><text class="char-count">{{ inputText.length }} / 2000</text><button class="send-button" :disabled="!inputText.trim() || isLoading || isInitializing" @click.stop="submitMessage">{{ isLoading ? '回应中' : '发送' }} <text v-if="!isLoading">↑</text></button></view></view>
           </view>
-          <view class="composer-caption"><text>对话保存在本机 · 新建对话会开启独立的记忆</text><text>不必着急，慢慢说。</text></view>
+          <view class="composer-caption"><text>对话随账号同步 · 新建对话会开启独立的记忆</text><text>不必着急，慢慢说。</text></view>
         </view>
       </view>
     </view>
@@ -116,6 +122,7 @@ import { useConversations } from '../../composables/useConversations'
 defineOptions({ options: { virtualHost: true } })
 const props = defineProps({ embedded: Boolean })
 const { sessions, messages, inputText, isLoading, isInitializing, error, scrollTop, scrollAnchor,
+  hasMoreSessions, isLoadingMoreSessions, loadMoreSessions, hasMoreMessages, isLoadingMoreMessages, loadOlderMessages,
   activeSessionId, activeTitle, turnCount, latestReferenceMessage, isFeedbackSaving, sendReferenceFeedback, disagreeWithReference, initialize, selectSession, clearChat, sendMessage, retry,
   deleteSession, onComposerKeydown, copyReply, chooseMood, openHome } = useConversations()
 const prompts = ['今天有件小事想和你分享', '最近有些累，想说说心里话', '先陪我随便聊聊吧']
@@ -197,7 +204,7 @@ defineExpose({ focusComposer })
 .new-session text { font-size: 20px; line-height: 16px; }
 .history-heading { display: flex; justify-content: space-between; color: #919b88; margin: 16px 10px 10px; font-size: 10px; letter-spacing: 1px; }
 .session-list { flex: 1; min-height: 0; }
-.history-empty { color: #929d89; font-size: 12px; line-height: 2; padding: 16px 10px; }
+.history-empty { white-space: pre-line; color: #929d89; font-size: 12px; line-height: 2; padding: 16px 10px; }
 .session-row { display: flex; border-radius: 9px; margin-bottom: 6px; align-items: center; }
 .session-row.selected { background: #dfe7d7; }
 .session-row:hover { background: #e4eadc; }
@@ -240,7 +247,7 @@ defineExpose({ focusComposer })
 .leaf-two { width: 35px; height: 28px; left: 104px; top: 42px; background: #8fa77b; }
 .welcome-eyebrow { font-size: 10px; color: #9aa68c; letter-spacing: 2px; }
 .welcome-title { font-family: serif; font-size: 23px; margin: 12px 0; color: #5e7350; }
-.welcome-description { font-size: 11px; color: #98a08c; line-height: 2; }
+.welcome-description { white-space: pre-line; font-size: 11px; color: #98a08c; line-height: 2; }
 .prompt-list { display: flex; gap: 9px; justify-content: center; margin-top: 23px; flex-wrap: wrap; }
 .workspace .prompt-list button { padding: 9px 12px; border: 1px solid #e4e8da; color: #88977b; border-radius: 7px; font-size: 10px; }
 .prompt-list text { margin-left: 10px; color: #a2af96; }
@@ -266,6 +273,8 @@ defineExpose({ focusComposer })
 .typing-dots text:nth-child(3) { animation-delay: .36s; }
 @keyframes breathe { 50% { opacity: .3; transform: translateY(-3px); } }
 .chat-bottom { height: 1px; }
+.load-more-wrap { display: flex; justify-content: center; margin: 4px 0 14px; }
+.workspace .load-more-btn { padding: 6px 14px; border: 1px solid #d7e0cd; border-radius: 999px; font-size: 11px; color: #5b724f; background: #f4f7ef; }
 .composer-wrap { padding: 0 22px 14px; flex-shrink: 0; }
 .composer { border: 1px solid #dfe6d4; border-radius: 11px; background: #fbfcf7; padding: 15px 16px 11px; }
 .composer-focused { border-color: #aabb9b; box-shadow: 0 0 0 3px #94a77e0a; }

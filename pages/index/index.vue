@@ -36,15 +36,17 @@
             <view class="nav-item-en">Little moments</view>
           </view>
         </view>
+        <view class="nav-item nav-link" :class="{ active: section === 'treehole' }" @click="section = 'treehole'">
+          <text class="nav-icon">🌿</text>
+          <view>
+            <view>情绪树洞</view>
+            <view class="nav-item-en">Tree hole</view>
+          </view>
+        </view>
       </view>
-
-      <navigator class="nav-item nav-link" url="/pages/island/index?mode=treehole">
-        <text class="nav-icon">🌿</text>
-        <view>情绪树洞<view class="nav-item-en">Tree hole</view></view>
-      </navigator>
       <view class="sidebar-note">
         <text class="spark">✳</text>
-        <text class="note-text">慢慢来，\n你已经在向前了。</text>
+        <text class="note-text">{{ '慢慢来，\n你已经在向前了。' }}</text>
       </view>
     </view>
 
@@ -63,10 +65,10 @@
         <view class="mobile-module" :class="{ active: section === 'home' || section === 'chat' }" @click="showChat()">心事倾诉</view>
         <view class="mobile-module" :class="{ active: section === 'board' }" @click="section = 'board'">情绪看板</view>
         <view class="mobile-module" :class="{ active: section === 'diary' }" @click="section = 'diary'">心情日记</view>
-        <navigator class="mobile-module" url="/pages/island/index?mode=treehole">情绪树洞</navigator>
+        <view class="mobile-module" :class="{ active: section === 'treehole' }" @click="section = 'treehole'">情绪树洞</view>
       </view>
 
-      <IslandSections v-if="section === 'board' || section === 'diary'" ref="islandSections" embedded
+      <IslandSections v-if="section === 'board' || section === 'diary' || section === 'treehole'" ref="islandSections" embedded
         :initial-mode="section" @change-mode="section = $event" @open-chat="showChat()" />
       <ConversationWorkspace v-else-if="section === 'chat'" embedded />
       <view v-else class="page">
@@ -74,7 +76,7 @@
         <view class="page-heading">
           <view>
             <view class="eyebrow">• YOUR SAFE LITTLE SPACE</view>
-            <view class="greeting">上午好，旅人 <text class="greeting-spark">✳</text></view>
+            <view class="greeting">{{ greeting }}，旅人 <text class="greeting-spark">✳</text></view>
             <view class="desc">放下外面的忙碌，这一刻，留给你自己。</view>
           </view>
           <button class="new-chat-btn" :disabled="isLoading || isInitializing" @click="startNewConversation">+ 新的倾诉</button>
@@ -106,7 +108,7 @@
                 </view>
                 <view class="welcome-tag">不必逞强，也不用准备好</view>
                 <view class="welcome-h2">今天，心里住着什么天气？</view>
-                <view class="welcome-p">开心的、烦恼的，或是说不上来的。\n在这里，每一种感受都有被接住的地方。</view>
+                <view class="welcome-p">{{ '开心的、烦恼的，或是说不上来的。\n在这里，每一种感受都有被接住的地方。' }}</view>
 
                 <!-- 情绪圆球 -->
                 <view class="mood-selector">
@@ -120,7 +122,7 @@
               <!-- 聊天记录列表 -->
               <view v-else class="chat-records">
                 <view class="conversation-date">给自己一点时间，慢慢说。</view>
-                <view v-for="(msg, index) in messages" :key="index" class="conversation-turn">
+                <view v-for="msg in messages" :key="msg.id" class="conversation-turn">
                   <!-- 用户发送 -->
                   <view v-if="msg.role === 'user'" class="user-message">
                     <view class="message-bubble">{{ msg.content }}</view>
@@ -153,7 +155,7 @@
             <view class="card journal-invite">
               <view class="section-eyebrow">🖋 留住此刻的感受</view>
               <view class="little-sun"></view>
-              <view class="journal-title">每一种心情，\n都有它的意义。</view>
+              <view class="journal-title">{{ '每一种心情，\n都有它的意义。' }}</view>
               <view class="journal-desc">不急着变好，先试着看见自己。</view>
             </view>
 
@@ -185,9 +187,17 @@ const { messages, isLoading, isInitializing, error, scrollTop,
   clearChat, initialize, chooseMood, retry } = useConversations()
 const section = ref('home')
 const islandSections = ref(null)
-const sectionTitle = computed(() => ({ board: '情绪看板', diary: '心情日记' })[section.value] || '心事倾诉')
+const sectionTitle = computed(() => ({ board: '情绪看板', diary: '心情日记', treehole: '情绪树洞' })[section.value] || '心事倾诉')
+const greeting = computed(() => {
+  const h = new Date().getHours()
+  if (h < 5) return '夜深了'
+  if (h < 11) return '上午好'
+  if (h < 13) return '中午好'
+  if (h < 18) return '下午好'
+  return '晚上好'
+})
 onLoad(options => {
-  if (options?.mode === 'board' || options?.mode === 'diary') section.value = options.mode
+  if (['board', 'diary', 'treehole', 'chat'].includes(options?.mode)) section.value = options.mode
 })
 onShow(() => {
   initialize()
@@ -202,6 +212,7 @@ function showChat(prefill) {
   section.value = 'chat'
 }
 async function startNewConversation() {
+  if (!account.value) return openLogin()
   if (isLoading.value || isInitializing.value) return
   await clearChat()
   if (!error.value) showChat()
@@ -217,17 +228,6 @@ const moods = [
 </script>
 
 <style>
-.chat-panel { cursor: pointer; }
-.chat-entry { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; width: 100%; min-height: 58px; padding: 10px 14px; text-align: left; font-size: 13px; line-height: 1.5; background: #fafbf6; color: #596b50; border: 1px solid #e3e8d9; border-radius: 9px; }
-.chat-entry::after { border: none; }
-.chat-entry:focus-visible { outline: 2px solid #829b6f; }
-.chat-entry text:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.entry-arrow { flex-shrink: 0; color: #4b6847; font-weight: 600; }
-.new-chat-btn { margin: 0; line-height: normal; }
-.new-chat-btn::after { border: none; }
-
-.classic-error { color: #a34e44; font-size: 12px; padding: 8px 0; cursor: pointer; }
-
 /* 这里直接采用原项目的优秀 CSS 变量和排版 */
 page {
   background-color: #f7f8f4;
@@ -238,6 +238,19 @@ page {
   height: 100vh;
   overflow: hidden;
 }
+</style>
+
+<style scoped>
+.chat-panel { cursor: pointer; }
+.chat-entry { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; width: 100%; min-height: 58px; padding: 10px 14px; text-align: left; font-size: 13px; line-height: 1.5; background: #fafbf6; color: #596b50; border: 1px solid #e3e8d9; border-radius: 9px; }
+.chat-entry::after { border: none; }
+.chat-entry:focus-visible { outline: 2px solid #829b6f; }
+.chat-entry text:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.entry-arrow { flex-shrink: 0; color: #4b6847; font-weight: 600; }
+.new-chat-btn { margin: 0; line-height: normal; }
+.new-chat-btn::after { border: none; }
+
+.classic-error { color: #a34e44; font-size: 12px; padding: 8px 0; cursor: pointer; }
 
 .app-shell {
   display: flex;
@@ -269,7 +282,7 @@ page {
 
 .sidebar-note { position: relative; margin: 38px 10px 20px; padding: 20px 12px; border-top: 1px solid #dde5d4; }
 .spark { font-size: 30px; color: #96a78a; }
-.note-text { display: block; font-family: "Noto Serif SC", serif; font-size: 16px; line-height: 1.9; color: #7c8c71; margin-top: 10px; }
+.note-text { display: block; white-space: pre-line; font-family: "Noto Serif SC", serif; font-size: 16px; line-height: 1.9; color: #7c8c71; margin-top: 10px; }
 
 /* ============ 右侧主体 ============ */
 .main-shell {
@@ -312,7 +325,7 @@ page {
 
 .welcome-tag { display: block; color: #a0a98d; font-size: 9px; letter-spacing: 2px; }
 .welcome-h2 { font-family: "Noto Serif SC", serif; font-size: 22px; color: #536649; margin-top: 15px; font-weight: 500; }
-.welcome-p { font-size: 11px; color: #9aa18f; margin-top: 12px; line-height: 2; }
+.welcome-p { white-space: pre-line; font-size: 11px; color: #9aa18f; margin-top: 12px; line-height: 2; }
 
 .mood-selector { display: flex; justify-content: center; gap: 27px; margin: 32px 0; }
 .mood-item { display: flex; flex-direction: column; align-items: center; gap: 8px; }
@@ -342,7 +355,7 @@ page {
 .card { border: 1px solid #e8eae2; border-radius: 13px; background: #fffefa; padding: 22px 21px; }
 .section-eyebrow { font-size: 10px; color: #839176; }
 .journal-invite { background: #f1f4e9; position: relative; overflow: hidden; }
-.journal-title { font-family: "Noto Serif SC", serif; font-size: 22px; color: #607352; margin: 19px 0 12px; line-height: 1.6; }
+.journal-title { white-space: pre-line; font-family: "Noto Serif SC", serif; font-size: 22px; color: #607352; margin: 19px 0 12px; line-height: 1.6; }
 .journal-desc { font-size: 10px; color: #95a083; }
 .little-sun { position: absolute; right: -4px; top: 50px; width: 60px; height: 60px; background: #e3e7c9; border-radius: 50%; opacity: 0.7; }
 

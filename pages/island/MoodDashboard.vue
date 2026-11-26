@@ -4,10 +4,17 @@
       <view>
         <view class="eyebrow">情绪看板 / A GENTLE LOOK WITHIN</view>
         <view class="greeting">看见情绪的起伏</view>
-        <view class="description">情绪没有好坏之分，记录是为了更温柔地理解自己。统计来自日记里的自填心情。</view>
+        <view class="description">{{ source === 'chat'
+          ? '情绪没有好坏之分。统计来自心事倾诉中识别的六类情绪（优先采纳你的更正与多句参考，仅供参考）。'
+          : '情绪没有好坏之分，记录是为了更温柔地理解自己。统计来自日记里的自填心情。' }}</view>
       </view>
-      <view class="time-switcher">
-        <button v-for="days in [7, 30, 90]" :key="days" class="range-option" :class="{ active: timeRange === days }" @click="timeRange = days">近 {{ days }} 天</button>
+      <view class="dashboard-controls">
+        <view class="time-switcher">
+          <button v-for="item in sources" :key="item.id" class="range-option" :class="{ active: source === item.id }" @click="source = item.id">{{ item.name }}</button>
+        </view>
+        <view class="time-switcher">
+          <button v-for="days in [7, 30, 90]" :key="days" class="range-option" :class="{ active: timeRange === days }" @click="timeRange = days">近 {{ days }} 天</button>
+        </view>
       </view>
     </view>
 
@@ -20,13 +27,13 @@
         </view>
       </view>
 
-      <view v-if="timeRange === 7 || !details.length" class="empty-dashboard">
+      <view v-if="!activeTotal" class="empty-dashboard">
         <view class="plant-island" />
         <view class="empty-title">每一种心情，都能留下轨迹</view>
-        <view class="description">{{ timeRange === 7 ? '和心屿聊一聊，或写下今天的日记。' : '这段时间还没有日记。可以从记下一件小事开始。' }}</view>
+        <view class="description">{{ source === 'chat' ? '这段时间还没有可统计的对话情绪。去和心屿聊一聊吧。' : '这段时间还没有日记。可以从记下一件小事开始。' }}</view>
         <view class="empty-actions">
-          <button class="dashboard-primary" @click="$emit('open-diary')">去写日记</button>
-          <button @click="$emit('open-chat')">开始倾诉 →</button>
+          <button :class="source === 'chat' ? '' : 'dashboard-primary'" @click="$emit('open-diary')">去写日记</button>
+          <button :class="source === 'chat' ? 'dashboard-primary' : ''" @click="$emit('open-chat')">开始倾诉 →</button>
         </view>
       </view>
 
@@ -34,9 +41,9 @@
         <view class="charts-grid">
           <view class="chart-card">
             <view class="chart-title">📈 情绪变化 <text class="chart-tag">最近 {{ timeRange }} 天</text></view>
-            <view class="description">按天查看各类心情的日记篇数。</view>
+            <view class="description">{{ source === 'chat' ? '按天查看心事倾诉中的各类情绪分布。' : '按天查看各类心情的日记篇数。' }}</view>
             <view class="chart-wrapper">
-              <qiun-data-charts type="line" :chartData="trend" :opts="lineOptions" />
+              <qiun-data-charts :key="source" type="line" :chartData="trend" :opts="lineOptions" />
             </view>
             <view class="legend">
               <text v-for="item in distribution" :key="item.name"><text class="color-dot" :style="{ background: item.color }" />{{ item.name }}</text>
@@ -47,8 +54,8 @@
             <view class="description">每一种感受，都构成完整的你。</view>
             <view class="donut-circle" :style="donutStyle">
               <view class="donut-inner">
-                <text class="donut-number">{{ details.length }}</text>
-                <text class="description">次心情记录</text>
+                <text class="donut-number">{{ activeTotal }}</text>
+                <text class="description">{{ source === 'chat' ? '轮情绪参考' : '次心情记录' }}</text>
               </view>
             </view>
             <view v-for="item in distribution" :key="item.name" class="color-item">
@@ -59,13 +66,16 @@
         </view>
 
         <view class="chart-card details-card">
-          <view class="chart-title">📋 情绪明细记录</view>
-          <view class="description">记录清单，回看每一段心情。</view>
-          <view class="table-row table-header"><text>日期</text><text>情绪标签</text><text>内容</text></view>
+          <view class="chart-title">📋 {{ source === 'chat' ? '对话情绪明细' : '情绪明细记录' }}</view>
+          <view class="description">{{ source === 'chat' && chatStats?.has_more ? '明细仅展示最近 200 条对话记录，上方统计涵盖全部已识别记录。' : '记录清单，回看每一段心情。' }}</view>
+          <view class="table-row table-header"><text>日期</text><text>情绪标签</text><text>{{ source === 'chat' ? '倾诉内容' : '内容' }}</text></view>
           <view v-for="entry in details" :key="entry.id" class="table-row">
             <text>{{ entry.day }}</text>
-            <view><text class="tag-emotion" :style="{ background: moodColors[entry.mood] + '22' }">{{ entry.mood }}</text></view>
-            <text class="entry-body">{{ entry.body }}</text>
+            <view class="tag-cell">
+              <text class="tag-emotion" :style="{ background: moodColors[entry.emotion || entry.mood] + '22' }">{{ entry.emotion || entry.mood }}</text>
+              <text v-if="source === 'chat' && entry.source" class="source-tag">{{ sourceLabels[entry.source] }}</text>
+            </view>
+            <text class="entry-body">{{ entry.text ?? entry.body }}</text>
           </view>
         </view>
       </template>
@@ -79,19 +89,39 @@ import { beijingDay } from '../../composables/demoPages'
 import QiunDataCharts from '../../uni_modules/qiun-data-charts/components/qiun-data-charts/qiun-data-charts.vue'
 
 defineOptions({ options: { virtualHost: true } })
-const props = defineProps({ diaries: Array, moods: Array, ready: Boolean })
+const props = defineProps({ diaries: Array, moods: Array, ready: Boolean, chatStats: Object })
 defineEmits(['open-chat', 'open-diary'])
 
+const source = ref('diary')
+const sources = [{ id: 'diary', name: '心情日记' }, { id: 'chat', name: '对话情绪' }]
 const timeRange = ref(7)
-const moodColors = { 平静: '#8fb5a4', 开心: '#d3a95c', 低落: '#699fc4', 紧张: '#8f92c4', 生气: '#cc767a', 惊喜: '#bc8fb0' }
+const chatLabels = ['快乐', '中性', '悲伤', '恐惧', '愤怒', '惊奇']
+const moodColors = {
+  平静: '#8fb5a4', 开心: '#d3a95c', 低落: '#699fc4', 紧张: '#8f92c4', 生气: '#cc767a', 惊喜: '#bc8fb0',
+  快乐: '#d3a95c', 中性: '#8fb5a4', 悲伤: '#699fc4', 恐惧: '#8f92c4', 愤怒: '#cc767a', 惊奇: '#bc8fb0',
+}
+const sourceLabels = { feedback: '用户更正', reference: '多句参考', model: '单句识别' }
+const activeLabels = computed(() => source.value === 'chat' ? chatLabels : props.moods)
 const dates = computed(() => Array.from({ length: timeRange.value }, (_, index) => beijingDay(index + 1 - timeRange.value)))
 const details = computed(() => {
   const firstDay = dates.value[0]
-  const lastDay = dates.value.at(-1)
-  return props.diaries.filter(entry => entry.day >= firstDay && entry.day <= lastDay)
+  const lastDay = dates.value[dates.value.length - 1]
+  const rows = source.value === 'chat' ? (props.chatStats?.records || []) : (props.diaries || [])
+  return rows.filter(entry => entry.day >= firstDay && entry.day <= lastDay)
 })
 const recordsByDay = computed(() => {
   const days = new Map()
+  if (source.value === 'chat') {
+    const firstDay = dates.value[0]
+    const lastDay = dates.value[dates.value.length - 1]
+    for (const item of (props.chatStats?.daily || [])) {
+      if (item.day < firstDay || item.day > lastDay) continue
+      const counts = new Map()
+      for (const [label, count] of Object.entries(item.counts || {})) counts.set(label, count)
+      if (counts.size) days.set(item.day, counts)
+    }
+    return days
+  }
   for (const { day, mood } of details.value) {
     if (!days.has(day)) days.set(day, new Map())
     const counts = days.get(day)
@@ -99,9 +129,18 @@ const recordsByDay = computed(() => {
   }
   return days
 })
-const distribution = computed(() => props.moods.map(name => {
-  const count = details.value.filter(entry => entry.mood === name).length
-  return { name, color: moodColors[name], count, share: details.value.length ? count / details.value.length : 0 }
+const activeTotal = computed(() => {
+  if (source.value === 'diary') return details.value.length
+  let total = 0
+  for (const dayCounts of recordsByDay.value.values()) {
+    for (const count of dayCounts.values()) total += count
+  }
+  return total
+})
+const distribution = computed(() => activeLabels.value.map(name => {
+  let count = 0
+  for (const dayCounts of recordsByDay.value.values()) count += dayCounts.get(name) || 0
+  return { name, color: moodColors[name], count, share: activeTotal.value ? count / activeTotal.value : 0 }
 }))
 const cards = computed(() => {
   const days = recordsByDay.value
@@ -113,25 +152,26 @@ const cards = computed(() => {
     streak += 1
     index -= 1
   }
+  const isChat = source.value === 'chat'
   return [
-    { title: '心情记录', icon: '💬', value: details.value.length, unit: '条', description: '每一次表达，都值得被记录' },
-    { title: '关照自己的日子', icon: '📅', value: days.size, unit: '天', description: `最近 ${timeRange.value} 天有日记的天数` },
-    { title: '连续记录', icon: '🌱', value: streak, unit: '天', description: '所选范围内从今天或昨天往前数' },
-    { title: '最常出现的心情', icon: '🍃', value: mostFrequent.count ? mostFrequent.name : '等待发现', description: mostFrequent.count ? `出现 ${mostFrequent.count} 次` : '从第一条心情记录开始' },
+    { title: isChat ? '情绪参考' : '心情记录', icon: '💬', value: activeTotal.value, unit: '条', description: isChat ? '近期倾诉中识别的情绪' : '每一次表达，都值得被记录' },
+    { title: isChat ? '倾诉的日子' : '关照自己的日子', icon: '📅', value: days.size, unit: '天', description: `最近 ${timeRange.value} 天有${isChat ? '对话' : '日记'}的天数` },
+    { title: isChat ? '连续倾诉' : '连续记录', icon: '🌱', value: streak, unit: '天', description: '所选范围内从今天或昨天往前数' },
+    { title: '最常出现的心情', icon: '🍃', value: mostFrequent?.count ? mostFrequent.name : '等待发现', description: mostFrequent?.count ? `出现 ${mostFrequent.count} 次` : `从第一条${isChat ? '对话情绪' : '心情记录'}开始` },
   ]
 })
 const trend = computed(() => ({
   categories: dates.value.map(day => day.slice(5)),
-  series: props.moods.map(name => ({ name, data: dates.value.map(day => recordsByDay.value.get(day)?.get(name) || 0) })),
+  series: activeLabels.value.map(name => ({ name, data: dates.value.map(day => recordsByDay.value.get(day)?.get(name) || 0) })),
 }))
-const lineOptions = {
-  color: props.moods.map(mood => moodColors[mood]),
+const lineOptions = computed(() => ({
+  color: activeLabels.value.map(label => moodColors[label]),
   legend: { show: false },
   dataPointShape: false,
   hideZeroValues: true,
   xAxis: { labelCount: 5 },
   yAxis: { data: [{ min: 0, tofix: 0 }] },
-}
+}))
 const donutStyle = computed(() => {
   let start = 0
   const stops = distribution.value.filter(item => item.count).map(item => {
@@ -147,6 +187,7 @@ const donutStyle = computed(() => {
 <style scoped>
 .dashboard { display: flex; flex: 1; flex-direction: column; }
 .dashboard-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 20px 0 29px; }
+.dashboard-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .eyebrow { color: #63765a; font-size: 11px; letter-spacing: 2px; }
 .greeting { margin: 6px 0; color: #3c483e; font: 30px/1.3 "Noto Serif SC", serif; }
 .description { color: #687665; font-size: 13px; line-height: 1.6; }
@@ -185,7 +226,9 @@ const donutStyle = computed(() => {
 .color-item { margin-bottom: 6px; }
 .table-row { display: grid; grid-template-columns: 88px 70px minmax(0, 1fr); align-items: start; gap: 8px; padding: 10px 8px; border-bottom: 1px solid #f0f3ea; font-size: 12px; }
 .table-header { margin-top: 12px; background: #f0f3ea; border-radius: 8px 8px 0 0; color: #4e6750; font-weight: 700; }
+.tag-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .tag-emotion { display: inline-block; padding: 2px 6px; border-radius: 4px; }
+.source-tag { font-size: 10px; color: #7b8b70; }
 .entry-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty-dashboard { display: flex; flex: 1 0 auto; flex-direction: column; justify-content: center; padding: 60px 20px; text-align: center; }
 .plant-island { position: relative; width: 220px; height: 140px; margin: 0 auto 24px; border-radius: 50%; background: #e9efdf; }

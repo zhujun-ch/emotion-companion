@@ -12,20 +12,6 @@
       "style": { "navigationBarTitleText": "心屿账号" }
     },
     {
-      "path": "pages/classic/index",
-      "style": {
-        "navigationStyle": "custom",
-        "navigationBarTitleText": "心屿 · 主页"
-      }
-    },
-    {
-      "path": "pages/file-preview/index",
-      "style": {
-        "navigationStyle": "custom",
-        "navigationBarTitleText": "心屿 · 文件预览"
-      }
-    },
-    {
       "path": "pages/conversation/index",
       "style": {
         "navigationStyle": "custom",

@@ -1,4 +1,4 @@
-<template><IslandSections v-if="!redirecting" ref="sections" :initial-mode="initialMode" /></template>
+<template><IslandSections v-if="ready && !redirecting" ref="sections" :initial-mode="initialMode" /></template>
 
 <script setup>
 import { ref } from 'vue'
@@ -7,14 +7,28 @@ import IslandSections from './IslandSections.vue'
 
 const sections = ref(null)
 const initialMode = ref('diary')
+const ready = ref(false)
 const redirecting = ref(false)
+let firstShow = true
 onLoad(options => {
   const mode = options?.mode
-  initialMode.value = mode
-  if (mode === 'board' || mode === 'diary') {
-    redirecting.value = true
-    uni.redirectTo({ url: `/pages/index/index?mode=${mode}`, fail: () => { redirecting.value = false } })
-  }
+  const targetMode = ['board', 'diary', 'treehole'].includes(mode) ? mode : 'diary'
+  initialMode.value = targetMode
+  redirecting.value = true
+  const targetUrl = `/pages/index/index?mode=${targetMode}`
+  uni.redirectTo({
+    url: targetUrl,
+    fail: () => uni.reLaunch({
+      url: targetUrl,
+      fail: () => { redirecting.value = false; ready.value = true },
+    }),
+  })
 })
-onShow(() => sections.value?.refresh())
+onShow(() => {
+  if (firstShow) {
+    firstShow = false
+    return
+  }
+  sections.value?.refresh()
+})
 </script>

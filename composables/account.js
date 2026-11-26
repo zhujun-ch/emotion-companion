@@ -25,14 +25,15 @@ export function clearAccount() {
 }
 
 export function requestAccount(action, data, method = 'POST') {
+  const header = accountHeaders()
   const token = account.value?.token
   return new Promise((resolve, reject) => {
     uni.request({
-      url: API + '/api/auth/' + action, method, header: accountHeaders(), data,
+      url: API + '/api/auth/' + action, method, header, data,
       timeout: 10000,
       success: response => {
         if (!['register', 'login'].includes(action) && token !== account.value?.token) return reject(new Error('登录状态已变更'))
-        if (response.statusCode === 401 && action.startsWith('credentials')) clearAccount()
+        if (response.statusCode === 401 && !['register', 'login', 'password'].includes(action)) clearAccount()
         if (response.statusCode >= 200 && response.statusCode < 300) resolve(response.data)
         else reject(new Error(response.data?.msg || '账号操作失败'))
       },
@@ -52,7 +53,11 @@ export async function signIn(action, username, password) {
 }
 
 export async function signOut() {
-  await requestAccount('logout')
-  clearAccount()
-  uni.reLaunch({ url: '/pages/index/index' })
+  try {
+    if (account.value) await requestAccount('logout')
+  } catch (_) {
+  } finally {
+    clearAccount()
+    uni.reLaunch({ url: '/pages/index/index' })
+  }
 }
