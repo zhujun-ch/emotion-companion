@@ -74,7 +74,7 @@ class AccountPostTests(unittest.TestCase):
         digest = sha256(token.encode()).hexdigest()
         with self.database() as db:
             db.execute('INSERT INTO post_author(token_hash) VALUES (?)', (digest,))
-            post_id = db.execute("INSERT INTO post(kind,body,state,reason,day,mine,author) VALUES ('倾诉','旧稿','published','','2026-11-20',1,?)", (digest,)).lastrowid
+            post_id = db.execute("INSERT INTO post(kind,body,state,reason,day,author) VALUES ('倾诉','旧稿','published','','2026-11-20',?)", (digest,)).lastrowid
             db.execute("INSERT INTO post_comment(post_id,body,state,reason,day,author) VALUES (?,'旧回复','pending','','2026-11-20',?)", (post_id, digest))
         claim = self.web | {'X-Treehole-Token': token}
         result = self.client.post('/api/demo/posts/claim', headers=claim)
@@ -126,3 +126,20 @@ class AccountPostTests(unittest.TestCase):
         with self.database() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM post WHERE body='回滚'").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM request_receipt WHERE request_id='rollback-request-001'").fetchone()[0], 0)
+
+    def test_drops_legacy_mine_column_and_skips_unowned_seed_diaries(self):
+        with self.database() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM diary').fetchone()[0], 0)
+            columns = {row[1] for row in db.execute('PRAGMA table_info(post)')}
+            self.assertNotIn('mine', columns)
+        legacy_path = Path(self.path).with_name('legacy_mine.sqlite3')
+        from contextlib import closing
+        with closing(sqlite3.connect(legacy_path)) as db, db:
+            db.execute('CREATE TABLE post (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL, day TEXT NOT NULL, mine INTEGER NOT NULL)')
+            db.execute("INSERT INTO post(kind,body,state,reason,day,mine) VALUES ('鼓励','旧数据','published','ok','2026-11-01',1)")
+        app = Flask(__name__)
+        app.register_blueprint(create_demo_pages(legacy_path, 'pw', lambda b: ('published', 'ok'), diary_owner=lambda: 'u'))
+        with closing(sqlite3.connect(legacy_path)) as db:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(post)')}
+            self.assertNotIn('mine', columns)
+            self.assertEqual(db.execute("SELECT body FROM post").fetchone()[0], '旧数据')

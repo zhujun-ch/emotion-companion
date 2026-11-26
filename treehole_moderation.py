@@ -1,9 +1,12 @@
 """Classify treehole posts for the local demo without using chat history."""
 import json
+import logging
 import re
 import unicodedata
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 CONTACT = re.compile(
@@ -71,6 +74,6 @@ def moderate_treehole(body, base_url, model):
             outcome = OUTCOMES.get((decision['decision'], decision['category']))
             if outcome:
                 return outcome
-    except (requests.RequestException, KeyError, TypeError, ValueError):
-        pass
+    except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+        logger.warning('树洞自动审核异常，已转人工: %s', exc)
     return 'pending', '自动审核暂不可用，已转人工'

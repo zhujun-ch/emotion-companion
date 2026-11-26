@@ -1,5 +1,7 @@
 # Replace domain, certificate paths, static directories and VPN CIDR before use.
 # Keep Flask/Waitress and Ollama bound to 127.0.0.1; expose only HTTPS.
+# Define a per-client-IP rate limit zone in your http {} block, e.g.:
+#   limit_req_zone $binary_remote_addr zone=xinyu_auth:10m rate=10r/m;
 server {
     listen 80;
     server_name emotion.example.com;
@@ -27,11 +29,18 @@ server {
         proxy_pass http://127.0.0.1:5000;
         proxy_read_timeout 190s;
     }
+    location /api/auth/ {
+        # limit_req zone=xinyu_auth burst=10 nodelay;
+        proxy_set_header Host $host;
+        proxy_pass http://127.0.0.1:5000;
+        proxy_read_timeout 190s;
+    }
     location /api/ {
         proxy_set_header Host $host;
         proxy_pass http://127.0.0.1:5000;
         proxy_read_timeout 190s;
     }
+    location = /admin { return 301 /admin/; }
     location ^~ /admin/ {
         allow 127.0.0.1;
         allow 10.8.0.0/24;

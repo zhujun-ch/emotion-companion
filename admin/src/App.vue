@@ -41,6 +41,9 @@
               <button class="danger" :disabled="busy" @click="review(item, 'remove')">下架</button>
             </div>
           </article>
+          <div v-if="postsHasMore || commentsHasMore" class="actions">
+            <button :disabled="busy" @click="loadMoreQueue">加载更多</button>
+          </div>
         </template>
       </section>
     </main>
@@ -50,7 +53,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-const sharedFeedUrl = (import.meta.env.VITE_CLIENT_URL || 'http://127.0.0.1:5173') + '/#/pages/island/index?mode=treehole'
+const sharedFeedUrl = (import.meta.env.VITE_CLIENT_URL || 'http://127.0.0.1:5173') + '/#/pages/index/index?mode=treehole'
 const api = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:5000') + '/api/demo/review'
 const tabs = [{ id: 'pending', name: '待审核' }, { id: 'published', name: '已发布' }, { id: 'closed', name: '处理记录' }]
 const labels = { pending: '待审核', published: '已发布', blocked: '自动拦截', rejected: '已驳回', removed: '已下架', withdrawn: '已撤回' }
@@ -60,6 +63,10 @@ const username = ref('admin')
 const password = ref('')
 const token = ref('')
 const posts = ref([])
+const postsHasMore = ref(false)
+const postsNextBeforeId = ref(null)
+const commentsHasMore = ref(false)
+const commentsNextBeforeId = ref(null)
 const reasons = ref({})
 const error = ref('')
 const busy = ref(false)
@@ -67,15 +74,25 @@ const inTab = (item, tab) => tab === 'closed' ? !['pending', 'published'].includ
 const count = tab => posts.value.filter(item => inTab(item, tab)).length
 const visible = computed(() => posts.value.filter(item => inTab(item, selected.value)))
 
-async function request(path, body) {
+async function request(path, body, { withMeta = false } = {}) {
   const response = await fetch(api + path, {
     method: body ? 'POST' : 'GET',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token.value },
     body: body && JSON.stringify(body),
   })
-  const data = await response.json()
-  if (!response.ok) throw new Error(data.message || '演示审核接口不可用')
-  return data
+  let data = {}
+  try { data = await response.json() } catch (_) {}
+  if (!response.ok) {
+    if (response.status === 401 && path !== '/login') token.value = ''
+    throw new Error(data.message || data.msg || '演示审核接口不可用')
+  }
+  if (!withMeta) return data
+  const rawNextBefore = response.headers.get('X-Next-Before-Id')
+  return {
+    data,
+    hasMore: response.headers.get('X-Has-More') === '1',
+    nextBeforeId: rawNextBefore !== null ? Number(rawNextBefore) : null,
+  }
 }
 async function run(action) {
   if (busy.value) return
@@ -86,11 +103,40 @@ async function run(action) {
   finally { busy.value = false }
 }
 async function loadQueue() {
-  const [allPosts, comments] = await Promise.all([request('/posts'), request('/comments')])
+  const [postRes, commentRes] = await Promise.all([
+    request('/posts?limit=100', undefined, { withMeta: true }),
+    request('/comments?limit=100', undefined, { withMeta: true }),
+  ])
+  postsHasMore.value = postRes.hasMore
+  postsNextBeforeId.value = postRes.nextBeforeId
+  commentsHasMore.value = commentRes.hasMore
+  commentsNextBeforeId.value = commentRes.nextBeforeId
   posts.value = [
-    ...allPosts.map(item => ({ ...item, targetType: 'post' })),
-    ...comments.map(item => ({ ...item, targetType: 'comment' })),
+    ...postRes.data.map(item => ({ ...item, targetType: 'post' })),
+    ...commentRes.data.map(item => ({ ...item, targetType: 'comment' })),
   ]
+}
+function loadMoreQueue() {
+  return run(async () => {
+    const [postRes, commentRes] = await Promise.all([
+      postsHasMore.value && postsNextBeforeId.value
+        ? request(`/posts?limit=100&before_id=${postsNextBeforeId.value}`, undefined, { withMeta: true })
+        : Promise.resolve({ data: [], hasMore: false, nextBeforeId: null }),
+      commentsHasMore.value && commentsNextBeforeId.value
+        ? request(`/comments?limit=100&before_id=${commentsNextBeforeId.value}`, undefined, { withMeta: true })
+        : Promise.resolve({ data: [], hasMore: false, nextBeforeId: null }),
+    ])
+    postsHasMore.value = postRes.hasMore
+    postsNextBeforeId.value = postRes.nextBeforeId
+    commentsHasMore.value = commentRes.hasMore
+    commentsNextBeforeId.value = commentRes.nextBeforeId
+    const seen = new Set(posts.value.map(item => item.targetType + '-' + item.id))
+    const appended = [
+      ...postRes.data.map(item => ({ ...item, targetType: 'post' })),
+      ...commentRes.data.map(item => ({ ...item, targetType: 'comment' })),
+    ].filter(item => !seen.has(item.targetType + '-' + item.id))
+    posts.value = [...posts.value, ...appended]
+  })
 }
 function login() {
   return run(async () => {
@@ -102,11 +148,17 @@ function login() {
 }
 function logout() {
   return run(async () => {
-    await request('/logout', {})
-    token.value = ''
-    posts.value = []
-    reasons.value = {}
-    selected.value = 'pending'
+    try { await request('/logout', {}) } catch (_) {}
+    finally {
+      token.value = ''
+      posts.value = []
+      postsHasMore.value = false
+      postsNextBeforeId.value = null
+      commentsHasMore.value = false
+      commentsNextBeforeId.value = null
+      reasons.value = {}
+      selected.value = 'pending'
+    }
   })
 }
 function refresh() {

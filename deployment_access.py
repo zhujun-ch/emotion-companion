@@ -34,6 +34,7 @@ def configure_access(app):
     app.config.update(TRUSTED_HOSTS=hosts, MAX_CONTENT_LENGTH=32 * 1024)
     CORS(app, resources={r'/api/*': {'origins': origins}},
          allow_headers=['Authorization', 'Content-Type', 'X-Treehole-Token', 'X-Request-ID'],
+         expose_headers=['X-Has-More', 'X-Next-Offset', 'X-Next-Before-Id'],
          methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], supports_credentials=False)
 
     @app.before_request
@@ -66,13 +67,19 @@ def consume_attempt(connect, namespace, username):
     """Shared across workers; no passwords or bearer tokens enter these rows."""
     from hashlib import sha256
     now = int(time())
-    identity = sha256(str(username).lower().encode()).hexdigest()
+    normalized_user = str(username or '').strip().lower()
+    identity = sha256(normalized_user.encode()).hexdigest()
+    remote_addr = request.remote_addr or ''
+    buckets = [(f'{namespace}:user:{identity}', 10)]
+    # Behind a local HTTPS reverse proxy in production, all clients arrive from loopback;
+    # enforce per-IP throttling at Nginx so one loopback bucket cannot lock out every user.
+    if not (os.getenv('APP_ENV', 'development') == 'production' and remote_addr in ('127.0.0.1', '::1')):
+        buckets.insert(0, (f'{namespace}:ip:{remote_addr}', 40))
     limited = False
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         db.execute('DELETE FROM credential_attempt WHERE reset_at <= ?', (now,))
-        for key, limit in ((f'{namespace}:ip:{request.remote_addr}', 40),
-                           (f'{namespace}:user:{identity}', 10)):
+        for key, limit in buckets:
             row = db.execute('SELECT attempts FROM credential_attempt WHERE bucket=?', (key,)).fetchone()
             if row and row['attempts'] >= limit:
                 limited = True

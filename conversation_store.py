@@ -3,8 +3,9 @@ import sqlite3
 import json
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from emotion_model import LABEL_NAMES
 from request_dedup import initialize_receipts, receipt, remember
 
 
@@ -14,6 +15,7 @@ class ConversationStore:
         self.save_emotion_records = save_emotion_records
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            db.execute('PRAGMA journal_mode=WAL')
             initialize_receipts(db)
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS chat_session (
@@ -42,6 +44,15 @@ class ConversationStore:
             if 'model_text' not in columns:
                 db.execute('ALTER TABLE chat_message ADD COLUMN model_text TEXT')
             if save_emotion_records:
+                db.execute("""CREATE TABLE IF NOT EXISTS emotion_record (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    user_text TEXT NOT NULL,
+                    emotion_label TEXT,
+                    confidence REAL,
+                    llm_reply TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )""")
                 columns = {r['name'] for r in db.execute('PRAGMA table_info(emotion_record)')}
                 if 'session_id' not in columns:
                     db.execute('ALTER TABLE emotion_record ADD COLUMN session_id TEXT')
@@ -81,24 +92,67 @@ class ConversationStore:
         return dict(row) if row else None
 
     def list(self, user_id):
+        items, _ = self.list_page(user_id, limit=None, offset=0)
+        return items
+
+    def list_page(self, user_id, limit=50, offset=0):
+        sql = '''SELECT s.id,s.title,s.created_at,s.updated_at,
+            (SELECT COUNT(*) FROM chat_message m WHERE m.session_id=s.id) AS message_count
+            FROM chat_session s WHERE s.user_id=? ORDER BY s.updated_at DESC, s.id DESC'''
+        params = [user_id]
+        if limit is not None:
+            sql += ' LIMIT ? OFFSET ?'
+            params.extend([limit + 1, offset])
         with self.connect() as db:
-            rows = db.execute('''SELECT s.id,s.title,s.created_at,s.updated_at,
-                (SELECT COUNT(*) FROM chat_message m WHERE m.session_id=s.id) AS message_count
-                FROM chat_session s WHERE s.user_id=? ORDER BY s.updated_at DESC''', (user_id,)).fetchall()
-        return [dict(r) for r in rows]
+            rows = db.execute(sql, params).fetchall()
+        has_more = limit is not None and len(rows) > limit
+        items = [dict(r) for r in (rows[:limit] if limit is not None else rows)]
+        return items, has_more
 
     def messages(self, session_id):
+        items, _, _ = self.messages_page(session_id, limit=None, before_id=None)
+        return items
+
+    def messages_page(self, session_id, limit=100, before_id=None):
         with self.connect() as db:
-            rows = db.execute('SELECT id,session_id,role,content,emotion,confidence,created_at,emotion_reference,chat_route FROM chat_message WHERE session_id=? ORDER BY id', (session_id,)).fetchall()
-            feedback = {r['message_id']:dict(r) for r in db.execute('''SELECT f.* FROM emotion_feedback f
-                JOIN chat_message m ON m.id=f.message_id WHERE m.session_id=?''',(session_id,))}
+            if limit is None:
+                rows = db.execute(
+                    'SELECT id,session_id,role,content,emotion,confidence,created_at,emotion_reference,chat_route '
+                    'FROM chat_message WHERE session_id=? ORDER BY id',
+                    (session_id,),
+                ).fetchall()
+                has_more = False
+                page_rows = rows
+            else:
+                where = 'WHERE session_id=?'
+                params = [session_id]
+                if before_id is not None:
+                    where += ' AND id<?'
+                    params.append(before_id)
+                params.append(limit + 1)
+                rows = db.execute(
+                    f'SELECT id,session_id,role,content,emotion,confidence,created_at,emotion_reference,chat_route '
+                    f'FROM chat_message {where} ORDER BY id DESC LIMIT ?',
+                    params,
+                ).fetchall()
+                has_more = len(rows) > limit
+                page_rows = list(reversed(rows[:limit]))
+            ids = [r['id'] for r in page_rows]
+            feedback = {}
+            if ids:
+                placeholders = ','.join('?' for _ in ids)
+                feedback = {
+                    r['message_id']: dict(r)
+                    for r in db.execute(f'SELECT * FROM emotion_feedback WHERE message_id IN ({placeholders})', ids)
+                }
         result = []
-        for r in rows:
+        for r in page_rows:
             item = dict(r)
             item['emotion_reference'] = json.loads(item['emotion_reference']) if item['emotion_reference'] else None
             item['feedback'] = feedback.get(item['id'])
             result.append(item)
-        return result
+        next_before_id = result[0]['id'] if has_more and result else None
+        return result, has_more, next_before_id
 
     def user_evidence(self, session_id, limit=4):
         with self.connect() as db:
@@ -174,6 +228,75 @@ class ConversationStore:
                                      'assistant_message_id': assistant_message.lastrowid}
                 return remember(db, user_id, 'chat', request_id, content_hash, result)
             return user_message.lastrowid, assistant_message.lastrowid
+
+    def emotion_stats(self, user_id, days=90, detail_limit=200):
+        beijing_tz = timezone(timedelta(hours=8))
+        today_bj = datetime.now(beijing_tz).date()
+        start_day_bj = today_bj - timedelta(days=days - 1)
+        first_day = start_day_bj.isoformat()
+        last_day = today_bj.isoformat()
+        utc_lower = datetime.combine(start_day_bj, datetime.min.time(), tzinfo=beijing_tz).astimezone(timezone.utc).isoformat(timespec='microseconds')
+        with self.connect() as db:
+            rows = db.execute('''SELECT a.id, a.session_id, s.title AS session_title, a.emotion, a.confidence,
+                a.emotion_reference, a.created_at, f.agreed, f.correction,
+                (SELECT u.content FROM chat_message u
+                 WHERE u.session_id=a.session_id AND u.role='user' AND u.id<a.id
+                 ORDER BY u.id DESC LIMIT 1) AS user_text
+                FROM chat_message a
+                JOIN chat_session s ON s.id=a.session_id
+                LEFT JOIN emotion_feedback f ON f.message_id=a.id
+                WHERE s.user_id=? AND a.role='assistant' AND a.chat_route IN ('support', 'mixed')
+                  AND a.created_at>=?
+                ORDER BY a.id DESC''', (user_id, utc_lower)).fetchall()
+        counts = {label: 0 for label in LABEL_NAMES}
+        daily_map = {}
+        records = []
+        total = 0
+        for row in rows:
+            if row['agreed'] == 0:
+                if row['correction'] in LABEL_NAMES:
+                    emotion, source = row['correction'], 'feedback'
+                else:
+                    continue
+            else:
+                ref = json.loads(row['emotion_reference']) if row['emotion_reference'] else None
+                if ref and ref.get('state') == 'ready' and ref.get('label') in LABEL_NAMES:
+                    emotion, source = ref['label'], 'reference'
+                elif row['emotion'] in LABEL_NAMES:
+                    emotion, source = row['emotion'], 'model'
+                else:
+                    continue
+            dt = datetime.fromisoformat(row['created_at'])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            day = dt.astimezone(beijing_tz).date().isoformat()
+            if not (first_day <= day <= last_day):
+                continue
+            total += 1
+            counts[emotion] += 1
+            day_counts = daily_map.setdefault(day, {})
+            day_counts[emotion] = day_counts.get(emotion, 0) + 1
+            if len(records) < detail_limit:
+                records.append({
+                    'id': row['id'],
+                    'session_id': row['session_id'],
+                    'session_title': row['session_title'],
+                    'day': day,
+                    'created_at': row['created_at'],
+                    'emotion': emotion,
+                    'source': source,
+                    'confidence': row['confidence'],
+                    'text': row['user_text'] or '',
+                })
+        return {
+            'days': days,
+            'labels': list(LABEL_NAMES),
+            'total': total,
+            'counts': counts,
+            'daily': [{'day': day, 'counts': daily_map[day]} for day in sorted(daily_map)],
+            'records': records,
+            'has_more': total > len(records),
+        }
 
     def delete(self, session_id, user_id):
         with self.connect() as db:

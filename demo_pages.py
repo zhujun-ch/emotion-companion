@@ -1,6 +1,6 @@
 """Shared fixture data and interactions for the local three-front-end demo."""
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from hmac import digest
 from secrets import token_urlsafe
@@ -26,6 +26,7 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
     def database():
         db = sqlite3.connect(path, timeout=15)
         db.row_factory = sqlite3.Row
+        db.execute('PRAGMA foreign_keys=ON')
         try:
             with db:
                 yield db
@@ -33,6 +34,7 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
             db.close()
 
     with database() as db:
+        db.execute('PRAGMA journal_mode=WAL')
         initialize_receipts(db)
         initialize_attempts(db)
         db.executescript("""
@@ -43,7 +45,7 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
             CREATE TABLE IF NOT EXISTS post (
                 id INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL,
                 state TEXT NOT NULL, reason TEXT NOT NULL,
-                day TEXT NOT NULL, mine INTEGER NOT NULL
+                day TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS demo_seed (id INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS post_author (token_hash TEXT PRIMARY KEY);
@@ -74,9 +76,14 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
         columns = {row['name'] for row in db.execute('PRAGMA table_info(post)')}
         if 'author' not in columns:
             db.execute('ALTER TABLE post ADD COLUMN author TEXT')
+        if 'mine' in columns:
+            db.execute('ALTER TABLE post DROP COLUMN mine')
         for table in ('post', 'post_comment', 'post_author'):
             if 'user_id' not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
                 db.execute(f'ALTER TABLE {table} ADD COLUMN user_id TEXT')
+        for table in ('post', 'post_comment'):
+            if 'created_at' not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
+                db.execute(f'ALTER TABLE {table} ADD COLUMN created_at TEXT')
         db.execute('CREATE INDEX IF NOT EXISTS idx_post_user ON post(user_id, id)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_comment_user ON post_comment(user_id, id)')
         comment_columns = {row['name'] for row in db.execute('PRAGMA table_info(post_comment)')}
@@ -84,12 +91,8 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
             db.execute('ALTER TABLE post_comment ADD COLUMN parent_comment_id INTEGER REFERENCES post_comment(id)')
         if db.execute('INSERT OR IGNORE INTO demo_seed VALUES (1)').rowcount:
             today = date.today()
-            db.executemany('INSERT INTO diary(day, mood, body) VALUES (?, ?, ?)', [
-                (today.isoformat(), '平静', '晚饭后走了一小段路，回来时心里安静了许多。'),
-                ((today - timedelta(days=2)).isoformat(), '开心', '和同学一起完成了小组展示。'),
-            ])
             db.executemany(
-                'INSERT INTO post(kind, body, state, reason, day, mine) VALUES (?, ?, ?, ?, ?, 0)',
+                'INSERT INTO post(kind, body, state, reason, day) VALUES (?, ?, ?, ?, ?)',
                 [
                     ('鼓励', '如果今天只完成了一件小事，那一件也值得记下来。', 'published', '演示样例', today.isoformat()),
                     ('倾诉', '每次在课堂上发言都很紧张，想慢慢练习把话说完。', 'published', '演示样例', today.isoformat()),
@@ -119,11 +122,52 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
             abort(400, f'正文须在 1 至 {limit} 字之间')
         return body.strip()
 
+    def int_arg(name, default=None, *, minimum=0, maximum=None):
+        raw = request.args.get(name)
+        if raw is None or raw == '':
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            abort(400, f'参数 {name} 须为整数')
+        if value < minimum or (maximum is not None and value > maximum):
+            abort(400, f'参数 {name} 超出允许范围')
+        return value
+
+    def paginated_array(items, has_more, *, next_offset=None, next_before_id=None):
+        response = jsonify(items)
+        response.headers['X-Has-More'] = '1' if has_more else '0'
+        if has_more and next_offset is not None:
+            response.headers['X-Next-Offset'] = str(next_offset)
+        if has_more and next_before_id is not None:
+            response.headers['X-Next-Before-Id'] = str(next_before_id)
+        return response
+
     @pages.get('/diaries')
     def list_diaries():
         owner = diary_owner()
+        limit = int_arg('limit', 100, minimum=1, maximum=500)
+        offset = int_arg('offset', 0, minimum=0)
+        clauses = ['user_id = ?']
+        params = [owner]
+        for param_name, op in (('from_day', '>='), ('to_day', '<=')):
+            raw_day = request.args.get(param_name)
+            if raw_day:
+                try:
+                    parsed = date.fromisoformat(raw_day).isoformat()
+                except ValueError:
+                    abort(400, '日期格式无效')
+                clauses.append(f'day {op} ?')
+                params.append(parsed)
+        params.extend([limit + 1, offset])
         with database() as db:
-            return jsonify([dict(row) for row in db.execute('SELECT id, day, mood, body FROM diary WHERE user_id = ? ORDER BY day DESC, id DESC', (owner,))])
+            rows = db.execute(
+                f'SELECT id, day, mood, body FROM diary WHERE {" AND ".join(clauses)} ORDER BY day DESC, id DESC LIMIT ? OFFSET ?',
+                params,
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [dict(row) for row in rows[:limit]]
+        return paginated_array(items, has_more, next_offset=offset + len(items))
 
     @pages.route('/diaries', methods=['POST'])
     @pages.route('/diaries/<int:item_id>', methods=['PUT', 'DELETE'])
@@ -200,29 +244,85 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
     @pages.get('/posts')
     def list_posts():
         owner = diary_owner() if request.headers.get('Authorization') else None
+        limit = int_arg('limit', 30, minimum=1, maximum=100)
+        before_id = int_arg('before_id', None, minimum=1)
+        mine_limit = int_arg('mine_limit', 50, minimum=1, maximum=100)
+        mine_before_id = int_arg('mine_before_id', None, minimum=1)
+        mine_comments_before_id = int_arg('mine_comments_before_id', None, minimum=1)
         with database() as db:
-            public = [dict(row) for row in db.execute('''SELECT id, kind, body, day FROM post
-                                                        WHERE state = 'published' ORDER BY id DESC''')]
-            comments = db.execute('''SELECT c.id, c.post_id, c.body, c.day, c.parent_comment_id,
-                                            parent.body AS parent_body FROM post_comment c
-                                     JOIN post p ON p.id = c.post_id
-                                     LEFT JOIN post_comment parent ON parent.id = c.parent_comment_id
-                                         AND parent.post_id = c.post_id AND parent.state = 'published'
-                                     WHERE c.state = 'published' AND p.state = 'published'
-                                     ORDER BY c.id''')
+            pub_where = "state = 'published'"
+            pub_params = []
+            if before_id is not None:
+                pub_where += ' AND id < ?'
+                pub_params.append(before_id)
+            pub_params.append(limit + 1)
+            pub_rows = db.execute(
+                f'SELECT id, kind, body, day FROM post WHERE {pub_where} ORDER BY id DESC LIMIT ?',
+                pub_params,
+            ).fetchall()
+            public_has_more = len(pub_rows) > limit
+            public = [dict(row) for row in pub_rows[:limit]]
             grouped = {item['id']: [] for item in public}
-            for row in comments:
-                grouped[row['post_id']].append(dict(row))
+            if public:
+                placeholders = ','.join('?' for _ in public)
+                post_ids = [item['id'] for item in public]
+                comments = db.execute(f'''SELECT c.id, c.post_id, c.body, c.day, c.parent_comment_id,
+                                                parent.body AS parent_body FROM post_comment c
+                                         JOIN post p ON p.id = c.post_id
+                                         LEFT JOIN post_comment parent ON parent.id = c.parent_comment_id
+                                             AND parent.post_id = c.post_id AND parent.state = 'published'
+                                         WHERE c.state = 'published' AND p.state = 'published'
+                                           AND c.post_id IN ({placeholders})
+                                         ORDER BY c.id''', post_ids)
+                for row in comments:
+                    grouped[row['post_id']].append(dict(row))
             for item in public:
                 item['comments'] = grouped[item['id']]
-            mine = db.execute('''SELECT id, kind, body, state, reason, day FROM post
-                                 WHERE user_id = ? ORDER BY id DESC''', (owner,))
-            mine_comments = db.execute('''SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day, c.parent_comment_id,
-                                                 p.body AS post_body FROM post_comment c
-                                          JOIN post p ON p.id = c.post_id
-                                          WHERE c.user_id = ? ORDER BY c.id DESC''', (owner,))
-            return jsonify(public=public, mine=[dict(row) for row in mine],
-                           mine_comments=[dict(row) for row in mine_comments])
+            public_next_before_id = public[-1]['id'] if public_has_more and public else None
+
+            if owner is not None:
+                mine_where = 'user_id = ?'
+                mine_params = [owner]
+                if mine_before_id is not None:
+                    mine_where += ' AND id < ?'
+                    mine_params.append(mine_before_id)
+                mine_params.append(mine_limit + 1)
+                mine_rows = db.execute(
+                    f'SELECT id, kind, body, state, reason, day, created_at FROM post WHERE {mine_where} ORDER BY id DESC LIMIT ?',
+                    mine_params,
+                ).fetchall()
+                mine_has_more = len(mine_rows) > mine_limit
+                mine = [dict(row) for row in mine_rows[:mine_limit]]
+                mine_next_before_id = mine[-1]['id'] if mine_has_more and mine else None
+
+                mc_where = 'c.user_id = ?'
+                mc_params = [owner]
+                if mine_comments_before_id is not None:
+                    mc_where += ' AND c.id < ?'
+                    mc_params.append(mine_comments_before_id)
+                mc_params.append(mine_limit + 1)
+                mc_rows = db.execute(f'''SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day, c.created_at, c.parent_comment_id,
+                                                p.body AS post_body FROM post_comment c
+                                         JOIN post p ON p.id = c.post_id
+                                         WHERE {mc_where} ORDER BY c.id DESC LIMIT ?''', mc_params).fetchall()
+                mine_comments_has_more = len(mc_rows) > mine_limit
+                mine_comments = [dict(row) for row in mc_rows[:mine_limit]]
+                mine_comments_next_before_id = mine_comments[-1]['id'] if mine_comments_has_more and mine_comments else None
+            else:
+                mine, mine_has_more, mine_next_before_id = [], False, None
+                mine_comments, mine_comments_has_more, mine_comments_next_before_id = [], False, None
+
+            return jsonify(
+                public=public,
+                public_has_more=public_has_more,
+                public_next_before_id=public_next_before_id,
+                mine=mine,
+                mine_has_more=mine_has_more,
+                mine_next_before_id=mine_next_before_id,
+                mine_comments=mine_comments,
+                mine_comments_has_more=mine_comments_has_more,
+                mine_comments_next_before_id=mine_comments_next_before_id,
+            )
 
     @pages.post('/posts')
     def submit_post():
@@ -244,9 +344,10 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
             previous = receipt(db, owner, 'post', request_id, content_hash)
             if previous is not None:
                 return jsonify(previous)
+            created_at = datetime.now(timezone.utc).isoformat(timespec='microseconds')
             item_id = db.execute(
-                'INSERT INTO post(kind, body, state, reason, day, mine, user_id) VALUES (?, ?, ?, ?, ?, 1, ?)',
-                (kind, body, state, reason, date.today().isoformat(), owner),
+                'INSERT INTO post(kind, body, state, reason, day, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (kind, body, state, reason, date.today().isoformat(), owner, created_at),
             ).lastrowid
             audit(db, item_id, '系统', 'auto', state, reason)
             result = remember(db, owner, 'post', request_id, content_hash, dict(id=item_id, state=state, reason=reason))
@@ -278,9 +379,10 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
             previous = receipt(db, owner, 'comment', request_id, content_hash)
             if previous is not None:
                 return jsonify(previous)
-            inserted = db.execute(f'''INSERT INTO post_comment(post_id, body, state, reason, day, author, parent_comment_id, user_id)
-                SELECT id, ?, ?, ?, ?, '', ?, ? FROM ({published_target})''',
-                (body, state, reason, date.today().isoformat(), parent_id, owner, *target))
+            created_at = datetime.now(timezone.utc).isoformat(timespec='microseconds')
+            inserted = db.execute(f'''INSERT INTO post_comment(post_id, body, state, reason, day, author, parent_comment_id, user_id, created_at)
+                SELECT id, ?, ?, ?, ?, '', ?, ?, ? FROM ({published_target})''',
+                (body, state, reason, date.today().isoformat(), parent_id, owner, created_at, *target))
             if not inserted.rowcount:
                 abort(409, '回复对象状态已变化，请刷新')
             comment_id = inserted.lastrowid
@@ -323,7 +425,7 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
     def login():
         data = payload()
         supplied = data.get('password')
-        consume_attempt(database, 'reviewer', data.get('username'))
+        consume_attempt(database, 'reviewer', str(data.get('username') or '').strip())
         if (data.get('username') != reviewer_username or not isinstance(supplied, str)
                 or len(supplied) > 128 or not check_password_hash(password_hash, supplied)):
             abort(401, '账号或口令不正确')
@@ -361,51 +463,101 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
 
     @pages.get('/review/history')
     def review_history():
+        limit = int_arg('limit', 100, minimum=1, maximum=200)
+        offset = int_arg('offset', 0, minimum=0)
         with database() as db:
             require_reviewer(db)
-            return jsonify([dict(row) for row in db.execute('''
+            rows = db.execute('''
                 SELECT id, post_id, NULL AS comment_id, 'post' AS target_type,
                        actor, action, state, reason, created_at FROM post_audit
                 UNION ALL
                 SELECT id, post_id, comment_id, 'comment' AS target_type,
                        actor, action, state, reason, created_at FROM comment_audit
-                ORDER BY created_at DESC, id DESC LIMIT 100''')])
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?''', (limit + 1, offset)).fetchall()
+        has_more = len(rows) > limit
+        items = [dict(row) for row in rows[:limit]]
+        return paginated_array(items, has_more, next_offset=offset + len(items))
+
+    REVIEW_STATES = ('pending', 'published', 'blocked', 'rejected', 'removed', 'withdrawn')
 
     @pages.get('/review/posts')
     def review_posts():
+        limit = int_arg('limit', 100, minimum=1, maximum=200)
+        before_id = int_arg('before_id', None, minimum=1)
+        state = request.args.get('state')
+        if state and state not in REVIEW_STATES:
+            abort(400, '无效的审核状态')
+        clauses = []
+        params = []
+        if state:
+            clauses.append('state = ?')
+            params.append(state)
+        if before_id is not None:
+            clauses.append('id < ?')
+            params.append(before_id)
+        where = f'WHERE {" AND ".join(clauses)}' if clauses else ''
+        params.append(limit + 1)
         with database() as db:
             require_reviewer(db)
-            return jsonify([dict(row) for row in db.execute(
-                'SELECT id, kind, body, state, reason, day FROM post ORDER BY id DESC')])
+            rows = db.execute(
+                f'SELECT id, kind, body, state, reason, day FROM post {where} ORDER BY id DESC LIMIT ?',
+                params,
+            ).fetchall()
+        has_more = len(rows) > limit
+        items = [dict(row) for row in rows[:limit]]
+        return paginated_array(items, has_more, next_before_id=items[-1]['id'] if items else None)
 
     @pages.get('/review/comments')
     def review_comments():
+        limit = int_arg('limit', 100, minimum=1, maximum=200)
+        before_id = int_arg('before_id', None, minimum=1)
+        state = request.args.get('state')
+        if state and state not in REVIEW_STATES:
+            abort(400, '无效的审核状态')
+        clauses = []
+        params = []
+        if state:
+            clauses.append('c.state = ?')
+            params.append(state)
+        if before_id is not None:
+            clauses.append('c.id < ?')
+            params.append(before_id)
+        where = f'WHERE {" AND ".join(clauses)}' if clauses else ''
+        params.append(limit + 1)
         with database() as db:
             require_reviewer(db)
-            return jsonify([dict(row) for row in db.execute('''
+            rows = db.execute(f'''
                 SELECT c.id, c.post_id, c.body, c.state, c.reason, c.day, c.parent_comment_id,
                        p.body AS post_body FROM post_comment c
-                JOIN post p ON p.id = c.post_id ORDER BY c.id DESC''')])
+                JOIN post p ON p.id = c.post_id {where} ORDER BY c.id DESC LIMIT ?''', params).fetchall()
+        has_more = len(rows) > limit
+        items = [dict(row) for row in rows[:limit]]
+        return paginated_array(items, has_more, next_before_id=items[-1]['id'] if items else None)
+
+    def parse_review_request():
+        data = payload()
+        action = str(data.get('action'))
+        transition = {
+            'approve': ('pending', 'published', '人工审核通过'),
+            'reject': ('pending', 'rejected', '人工审核驳回'),
+            'remove': ('published', 'removed', '管理员下架'),
+        }.get(action)
+        if transition is None:
+            abort(400, '未知审核操作')
+        previous, state, default_reason = transition
+        reason = data.get('reason', '')
+        if not isinstance(reason, str) or len(reason.strip()) > 120:
+            abort(400, '审核原因最多 120 字')
+        if state == 'rejected' and not reason.strip():
+            abort(400, '请填写驳回原因')
+        return action, previous, state, reason.strip() or default_reason
 
     @pages.post('/review/comments/<int:comment_id>')
     def review_comment(comment_id):
+        action, previous, state, reason = parse_review_request()
         with database() as db:
+            db.execute('BEGIN IMMEDIATE')
             require_reviewer(db)
-            data = payload()
-            transition = {
-                'approve': ('pending', 'published', '人工审核通过'),
-                'reject': ('pending', 'rejected', '人工审核驳回'),
-                'remove': ('published', 'removed', '管理员下架'),
-            }.get(str(data.get('action')))
-            if transition is None:
-                abort(400, '未知审核操作')
-            previous, state, default_reason = transition
-            reason = data.get('reason', '')
-            if not isinstance(reason, str) or len(reason.strip()) > 120:
-                abort(400, '审核原因最多 120 字')
-            if state == 'rejected' and not reason.strip():
-                abort(400, '请填写驳回原因')
-            reason = reason.strip() or default_reason
             row = db.execute('SELECT post_id FROM post_comment WHERE id = ?', (comment_id,)).fetchone()
             if row is None:
                 abort(404, '回复不存在')
@@ -415,32 +567,21 @@ def create_demo_pages(path, reviewer_password, moderate_post, *, diary_owner, re
             if not db.execute('UPDATE post_comment SET state = ?, reason = ? WHERE id = ? AND state = ?',
                               (state, reason, comment_id, previous)).rowcount:
                 abort(409, '回复状态已变化，请刷新')
-            audit_comment(db, comment_id, row['post_id'], reviewer_username, data['action'], state, reason)
+            audit_comment(db, comment_id, row['post_id'], reviewer_username, action, state, reason)
         return jsonify(ok=True)
 
     @pages.post('/review/posts/<int:item_id>')
     def review(item_id):
+        action, previous, state, reason = parse_review_request()
         with database() as db:
+            db.execute('BEGIN IMMEDIATE')
             require_reviewer(db)
-            data = payload()
-            transition = {
-                'approve': ('pending', 'published', '人工审核通过'),
-                'reject': ('pending', 'rejected', '人工审核驳回'),
-                'remove': ('published', 'removed', '管理员下架'),
-            }.get(str(data.get('action')))
-            if transition is None:
-                abort(400, '未知审核操作')
-            previous, state, default_reason = transition
-            reason = data.get('reason', '')
-            if not isinstance(reason, str) or len(reason.strip()) > 120:
-                abort(400, '审核原因最多 120 字')
-            if state == 'rejected' and not reason.strip():
-                abort(400, '请填写驳回原因')
-            reason = reason.strip() or default_reason
+            if db.execute('SELECT 1 FROM post WHERE id = ?', (item_id,)).fetchone() is None:
+                abort(404, '稿件不存在')
             if not db.execute('UPDATE post SET state = ?, reason = ? WHERE id = ? AND state = ?',
                               (state, reason, item_id, previous)).rowcount:
                 abort(409, '稿件状态已变化，请刷新')
-            audit(db, item_id, reviewer_username, data['action'], state, reason)
+            audit(db, item_id, reviewer_username, action, state, reason)
         return jsonify(ok=True)
 
     return pages

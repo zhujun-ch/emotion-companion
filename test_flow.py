@@ -29,13 +29,19 @@ response.raise_for_status()
 result = response.json()
 assert result['status'] == 'success', result
 assert result['reply'].strip(), 'Empty model reply'
-assert 0 <= result['confidence'] <= 1
-if os.getenv('DB_BACKEND', 'mysql') == 'sqlite':
-    with sqlite3.connect(ROOT / os.getenv('SQLITE_PATH', 'artifacts/demo.sqlite3')) as db:
-        row = db.execute('SELECT user_text, emotion_label, llm_reply FROM emotion_record WHERE user_id=?', (user_id,)).fetchone()
-    assert row == (text, result['emotion_label'], result['reply']), 'Saved record mismatch'
+if result.get('chat_route') in ('support', 'mixed'):
+    assert 0 <= result['confidence'] <= 1
+    if os.getenv('DB_BACKEND', 'sqlite').lower() == 'sqlite':
+        db_path = (
+            ROOT / os.getenv('DEMO_DATA_DIR', 'artifacts') / 'pages_chat_demo.sqlite3'
+            if os.getenv('ENABLE_DEMO_PAGES') == '1'
+            else ROOT / os.getenv('SQLITE_PATH', 'artifacts/demo.sqlite3')
+        )
+        with sqlite3.connect(db_path) as db:
+            row = db.execute('SELECT user_text, emotion_label, llm_reply FROM emotion_record WHERE user_id=?', (user_id,)).fetchone()
+        assert row == (text, result['emotion_label'], result['reply']), 'Saved record mismatch'
 result['seconds'] = round(time.perf_counter() - started, 2)
-result['database_verified'] = os.getenv('DB_BACKEND') == 'sqlite'
+result['database_verified'] = os.getenv('DB_BACKEND', 'sqlite').lower() == 'sqlite' and result.get('chat_route') in ('support', 'mixed')
 out = ROOT / 'artifacts' / 'last-smoke-test.json'
 out.parent.mkdir(exist_ok=True)
 out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

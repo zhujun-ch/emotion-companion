@@ -1,8 +1,12 @@
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from flask import Flask, jsonify
+from account_auth import AccountAuth
+from conversation_store import ConversationStore
 from deployment_access import configure_access
 
 
@@ -46,3 +50,30 @@ class AccessTests(unittest.TestCase):
         with patch.dict(os.environ, config):
             client = self.app()
             self.assertEqual(client.get('/api/ping', base_url='https://emotion.example.test').status_code, 200)
+
+    def test_production_loopback_proxy_does_not_trigger_global_ip_lockout(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {'APP_ENV': 'production'}):
+            store = ConversationStore(Path(directory) / 'auth.sqlite3')
+            app = Flask(__name__)
+            app.register_blueprint(AccountAuth(store.connect).blueprint())
+            client = app.test_client()
+            for index in range(45):
+                response = client.post(
+                    '/api/auth/login',
+                    json={'username': f'user_{index}', 'password': 'wrong-password'},
+                    environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+                )
+                self.assertEqual(response.status_code, 401)
+            for _ in range(10):
+                response = client.post(
+                    '/api/auth/login',
+                    json={'username': 'target_user', 'password': 'wrong-password'},
+                    environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+                )
+                self.assertEqual(response.status_code, 401)
+            blocked = client.post(
+                '/api/auth/login',
+                json={'username': 'target_user', 'password': 'wrong-password'},
+                environ_overrides={'REMOTE_ADDR': '127.0.0.1'},
+            )
+            self.assertEqual(blocked.status_code, 429)

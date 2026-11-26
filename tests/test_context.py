@@ -196,6 +196,134 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(one.json, two.json)
         self.assertEqual(len(self.store.list(self.user)), 1)
 
+    def test_delete_missing_session_does_not_leak_lock_and_delete_cleans_lock(self):
+        backend.conversation_locks.clear()
+        self.assertEqual(self.client.delete('/api/sessions/nonexistent-session').status_code, 404)
+        self.assertNotIn('nonexistent-session', backend.conversation_locks)
+        session = self.create()
+        with patch.object(backend, 'predict_emotion', return_value=('快乐', .8)), patch.object(backend, 'ask_ollama', return_value='在听。'):
+            self.assertEqual(self.send(session, '你好').status_code, 200)
+        self.assertIn(session, backend.conversation_locks)
+        self.assertEqual(self.client.delete(f'/api/sessions/{session}').status_code, 200)
+        self.assertNotIn(session, backend.conversation_locks)
+
+    def test_session_messages_preserves_reference_after_feedback(self):
+        session = self.create()
+        ref = {'version': 2, 'label': '快乐', 'candidates': ['快乐', '中性'], 'turn_count': 4, 'evidence_count': 4, 'state': 'ready', 'reason': 'ok'}
+        with patch.object(backend, 'predict_emotion', return_value=('快乐', .9)), \
+                patch.object(backend, 'ask_ollama', return_value='在听。'), \
+                patch.object(backend.emotion_reference_policy, 'assess', return_value=ref):
+            for text in ('一', '二', '三', '四'):
+                resp = self.send(session, text)
+                self.assertEqual(resp.status_code, 200)
+            mid = resp.json['assistant_message_id']
+        self.assertEqual(self.client.post(f'/api/messages/{mid}/feedback', json={'agreed': False, 'correction': '悲伤'}).status_code, 200)
+        with patch.object(backend.emotion_reference_policy, 'assess', side_effect=AssertionError('should not overwrite feedback snapshot')):
+            fetched = self.client.get(f'/api/sessions/{session}/messages')
+            self.assertEqual(fetched.status_code, 200)
+            self.assertEqual(fetched.json['messages'][-1]['emotion_reference']['label'], '快乐')
+
+    def test_legacy_chat_without_session_cleans_up_empty_session_on_failure(self):
+        backend.conversation_locks.clear()
+        with patch.object(backend, 'predict_emotion', return_value=('快乐', .8)), \
+                patch.object(backend, 'ask_ollama', side_effect=requests.ConnectionError('down')):
+            resp = self.client.post('/api/chat', json={'text': '今天有点难过'})
+        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(self.store.list(self.user), [])
+        self.assertEqual(backend.conversation_locks, {})
+
+    def test_standalone_store_initializes_emotion_record_table(self):
+        standalone = ConversationStore(Path(self.temp.name) / 'standalone.sqlite3', save_emotion_records=True)
+        sid = standalone.create(self.user)['id']
+        standalone.save_turn(sid, self.user, '你好', '我在', '中性', .8)
+        with standalone.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM emotion_record').fetchone()[0], 1)
+
+    def test_sessions_and_messages_pagination(self):
+        s1, s2, s3 = self.create(), self.create(), self.create()
+        for idx in range(3):
+            self.store.save_turn(s1, self.user, f'u{idx}', f'a{idx}', '快乐', .8)
+        self.store.save_turn(s2, self.user, 'u_s2', 'a_s2', '中性', .7)
+        self.store.save_turn(s3, self.user, 'u_s3', 'a_s3', '悲伤', .9)
+
+        page1 = self.client.get('/api/sessions?limit=2&offset=0')
+        self.assertEqual(page1.status_code, 200)
+        self.assertEqual([s['id'] for s in page1.json['sessions']], [s3, s2])
+        self.assertTrue(page1.json['has_more'])
+        self.assertEqual(page1.json['next_offset'], 2)
+
+        page2 = self.client.get('/api/sessions?limit=2&offset=2')
+        self.assertEqual([s['id'] for s in page2.json['sessions']], [s1])
+        self.assertFalse(page2.json['has_more'])
+        self.assertIsNone(page2.json['next_offset'])
+        self.assertEqual(self.client.get('/api/sessions?limit=0').status_code, 400)
+
+        msg_p1 = self.client.get(f'/api/sessions/{s1}/messages?limit=4')
+        self.assertEqual(msg_p1.status_code, 200)
+        self.assertEqual([m['content'] for m in msg_p1.json['messages']], ['u1', 'a1', 'u2', 'a2'])
+        self.assertTrue(msg_p1.json['has_more'])
+        before_id = msg_p1.json['next_before_id']
+
+        msg_p2 = self.client.get(f'/api/sessions/{s1}/messages?limit=4&before_id={before_id}')
+        self.assertEqual([m['content'] for m in msg_p2.json['messages']], ['u0', 'a0'])
+        self.assertFalse(msg_p2.json['has_more'])
+        self.assertIsNone(msg_p2.json['next_before_id'])
+
+    def test_request_receipt_ttl_pruning(self):
+        import os
+        from time import time
+        with patch.dict(os.environ, {'REQUEST_RECEIPT_TTL_SECONDS': '120'}):
+            first = self.client.post('/api/sessions', json={'request_id': 'ttl-req-0001'})
+            self.assertEqual(first.status_code, 201)
+            with self.store.connect() as db:
+                db.execute("UPDATE request_receipt SET created_at=? WHERE request_id='ttl-req-0001'", (int(time()) - 300,))
+            self.assertIsNone(self.store.replay(self.user, 'ttl-req-0001', 'different'))
+            second = self.client.post('/api/sessions', json={'request_id': 'ttl-req-0002'})
+            self.assertEqual(second.status_code, 201)
+            with self.store.connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM request_receipt WHERE request_id='ttl-req-0001'").fetchone()[0], 0)
+
+    def test_emotion_stats_aggregates_sources_and_isolates_users(self):
+        from datetime import datetime, timedelta, timezone
+        from flask import abort
+        with patch.object(backend.account_auth, 'current_user', side_effect=lambda: abort(401)):
+            self.assertEqual(self.client.get('/api/emotions/stats').status_code, 401)
+
+        s1 = self.create()
+        self.store.save_turn(s1, self.user, '好开心', '太好了', '快乐', .9, None, chat_route='support')
+        self.store.save_turn(s1, self.user, '很失落', '抱抱你', '愤怒', .6, {'state': 'ready', 'label': '悲伤'}, chat_route='mixed')
+        _, mid_feedback = self.store.save_turn(s1, self.user, '心里发慌', '深呼吸', '中性', .7, {'state': 'ready', 'label': '中性'}, chat_route='support')
+        self.store.save_feedback(mid_feedback, self.user, False, '恐惧')
+        _, mid_uncertain = self.store.save_turn(s1, self.user, '说不清', '慢慢说', '惊奇', .7, {'state': 'ready', 'label': '惊奇'}, chat_route='support')
+        self.store.save_feedback(mid_uncertain, self.user, False, '说不准')
+        self.store.save_turn(s1, self.user, '写个排序', '只聊感受', None, None, None, chat_route='off_topic')
+        self.store.save_turn(s1, self.user, '复核未过', '先聊聊', None, None, None, chat_route='fallback')
+
+        other_sid = self.store.create('other_user')['id']
+        self.store.save_turn(other_sid, 'other_user', '别人的话', '回应', '愤怒', .9)
+
+        _, old_mid = self.store.save_turn(s1, self.user, '百天前的话', '回应', '惊奇', .8, chat_route='support')
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat(timespec='microseconds')
+        with self.store.connect() as db:
+            db.execute('UPDATE chat_message SET created_at=? WHERE id=?', (old_ts, old_mid))
+
+        resp = self.client.get('/api/emotions/stats?days=90&limit=2')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json
+        self.assertEqual(data['total'], 3)
+        self.assertEqual(data['counts']['快乐'], 1)
+        self.assertEqual(data['counts']['悲伤'], 1)
+        self.assertEqual(data['counts']['恐惧'], 1)
+        self.assertEqual(data['counts']['惊奇'], 0)
+        self.assertEqual(len(data['records']), 2)
+        self.assertTrue(data['has_more'])
+        self.assertEqual([r['source'] for r in data['records']], ['feedback', 'reference'])
+        self.assertEqual(sum(sum(d['counts'].values()) for d in data['daily']), 3)
+
+        wider = self.client.get('/api/emotions/stats?days=120&limit=10')
+        self.assertEqual(wider.json['total'], 4)
+        self.assertEqual(wider.json['counts']['惊奇'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

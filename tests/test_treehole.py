@@ -183,3 +183,59 @@ class TreeholeTests(unittest.TestCase):
         self.assertEqual(moderate_treehole('今天有点难受', 'http://local', 'qwen')[0], 'published')
         response.json.return_value = {'message': {'content': '{"decision":"allow","category":"privacy"}'}}
         self.assertEqual(moderate_treehole('今天有点难受', 'http://local', 'qwen')[0], 'pending')
+
+    def test_review_missing_post_returns_404(self):
+        login = self.client.post('/api/demo/review/login', json={'username': 'admin', 'password': 'test-password'})
+        reviewer = {'Authorization': 'Bearer ' + login.json['token']}
+        missing = self.client.post('/api/demo/review/posts/99999', json={'action': 'approve'}, headers=reviewer)
+        self.assertEqual(missing.status_code, 404)
+
+    def test_mine_items_include_created_at_while_public_schema_stays_minimal(self):
+        post_id = self.post('鼓励测试')
+        self.client.post(f'/api/demo/posts/{post_id}/comments', json={'body': '鼓励测试'}, headers=self.author)
+        data = self.lists(self.author)
+        self.assertTrue(data['mine'][0]['created_at'])
+        self.assertTrue(data['mine_comments'][0]['created_at'])
+        public = next(row for row in data['public'] if row['id'] == post_id)
+        self.assertEqual(set(public), {'id', 'kind', 'body', 'day', 'comments'})
+        self.assertEqual(set(public['comments'][0]), {'id', 'post_id', 'body', 'day', 'parent_comment_id', 'parent_body'})
+
+    def test_pagination_for_diaries_posts_and_review_endpoints(self):
+        for day, body in (('2026-11-10', 'd1'), ('2026-11-11', 'd2'), ('2026-11-12', 'd3'), ('2026-11-13', 'd4')):
+            self.assertEqual(self.client.post('/api/demo/diaries', json={'day': day, 'mood': '平静', 'body': body}, headers=self.author).status_code, 200)
+        d_p1 = self.client.get('/api/demo/diaries?limit=2&offset=0', headers=self.author)
+        self.assertEqual([r['body'] for r in d_p1.json], ['d4', 'd3'])
+        self.assertEqual(d_p1.headers['X-Has-More'], '1')
+        self.assertEqual(d_p1.headers['X-Next-Offset'], '2')
+        d_p2 = self.client.get('/api/demo/diaries?limit=2&offset=2', headers=self.author)
+        self.assertEqual([r['body'] for r in d_p2.json], ['d2', 'd1'])
+        self.assertEqual(d_p2.headers['X-Has-More'], '0')
+        d_filtered = self.client.get('/api/demo/diaries?from_day=2026-11-12&to_day=2026-11-13', headers=self.author)
+        self.assertEqual([r['body'] for r in d_filtered.json], ['d4', 'd3'])
+
+        post_ids = [self.post('鼓励测试') for _ in range(4)]
+        for idx in range(3):
+            self.client.post(f'/api/demo/posts/{post_ids[-1]}/comments', json={'body': '鼓励测试' if idx % 2 == 0 else '待审'}, headers=self.author)
+        p1 = self.client.get('/api/demo/posts?limit=2&mine_limit=2', headers=self.author).json
+        self.assertEqual(len(p1['public']), 2)
+        self.assertTrue(p1['public_has_more'])
+        self.assertEqual(len(p1['mine']), 2)
+        self.assertTrue(p1['mine_has_more'])
+        p2 = self.client.get(f"/api/demo/posts?limit=2&before_id={p1['public_next_before_id']}", headers=self.author).json
+        self.assertEqual(len(p2['public']), 2)
+        self.assertTrue(set(r['id'] for r in p1['public']).isdisjoint(r['id'] for r in p2['public']))
+
+        login = self.client.post('/api/demo/review/login', json={'username': 'admin', 'password': 'test-password'})
+        reviewer = {'Authorization': 'Bearer ' + login.json['token']}
+        rp1 = self.client.get('/api/demo/review/posts?limit=2', headers=reviewer)
+        self.assertEqual(len(rp1.json), 2)
+        self.assertEqual(rp1.headers['X-Has-More'], '1')
+        rp2 = self.client.get(f"/api/demo/review/posts?limit=2&before_id={rp1.headers['X-Next-Before-Id']}", headers=reviewer)
+        self.assertEqual(len(rp2.json), 2)
+        rc1 = self.client.get('/api/demo/review/comments?limit=2', headers=reviewer)
+        self.assertEqual(len(rc1.json), 2)
+        self.assertEqual(rc1.headers['X-Has-More'], '1')
+        rh1 = self.client.get('/api/demo/review/history?limit=2&offset=0', headers=reviewer)
+        self.assertEqual(len(rh1.json), 2)
+        self.assertEqual(rh1.headers['X-Has-More'], '1')
+        self.assertEqual(rh1.headers['X-Next-Offset'], '2')

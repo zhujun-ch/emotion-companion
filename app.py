@@ -1,5 +1,4 @@
-from flask import Flask, request, jsonify, g
-import pymysql
+from flask import Flask, abort, request, jsonify, g
 import requests
 import torch
 import os
@@ -46,39 +45,27 @@ SQLITE_PATH = (
     else BASE_DIR / os.getenv("SQLITE_PATH", "artifacts/demo.sqlite3")
 )
 
-
-def get_db_conn():
-    if DB_BACKEND == "sqlite":
-        return sqlite3.connect(SQLITE_PATH)
-    return pymysql.connect(
-        host=os.getenv("DB_HOST", "127.0.0.1"),
-        port=int(os.getenv("DB_PORT", "3306")),
-        user=os.getenv("DB_USER", "root"),
-        password=os.getenv("DB_PASSWORD", ""),
-        database=os.getenv("DB_NAME", "psych_db"), charset="utf8mb4",
-        connect_timeout=5,
-    )
-
-
-if DB_BACKEND == "sqlite":
-    SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with get_db_conn() as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS emotion_record (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            user_text TEXT NOT NULL,
-            emotion_label TEXT NOT NULL,
-            confidence REAL NOT NULL,
-            llm_reply TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )""")
-
-
 conversation_store = ConversationStore(
-    SQLITE_PATH if DB_BACKEND == 'sqlite' else BASE_DIR / 'artifacts/conversations.sqlite3',
-    save_emotion_records=DB_BACKEND == 'sqlite',
+    SQLITE_PATH,
+    save_emotion_records=True,
 )
 conversation_locks = {}
+conversation_locks_guard = Lock()
+
+
+def _get_conversation_lock(session_id):
+    with conversation_locks_guard:
+        lock = conversation_locks.get(session_id)
+        if lock is None:
+            lock = Lock()
+            conversation_locks[session_id] = lock
+        return lock
+
+
+def _release_conversation_lock(session_id, lock):
+    with conversation_locks_guard:
+        if conversation_locks.get(session_id) is lock:
+            conversation_locks.pop(session_id, None)
 
 account_auth = AccountAuth(conversation_store.connect)
 app.register_blueprint(account_auth.blueprint())
@@ -109,7 +96,7 @@ if DEMO_PAGES_ENABLED:
 @app.before_request
 def require_conversation_account():
     if request.method != 'OPTIONS' and request.endpoint in {
-        'sessions', 'session_messages', 'delete_session', 'emotion_feedback', 'chat',
+        'sessions', 'session_messages', 'delete_session', 'emotion_feedback', 'emotion_stats', 'chat',
     }:
         g.user_id = account_auth.current_user()['id']
 
@@ -118,10 +105,18 @@ def require_conversation_account():
 @app.errorhandler(401)
 @app.errorhandler(409)
 @app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(405)
 @app.errorhandler(413)
 @app.errorhandler(429)
 def account_error(error):
     return jsonify(status='error', msg=error.description), error.code
+
+
+@app.errorhandler(500)
+def internal_error(_error):
+    app.logger.exception("服务内部错误")
+    return jsonify(status='error', msg='服务内部错误，请稍后重试'), 500
 
 
 
@@ -156,7 +151,7 @@ def ask_ollama(user_text, emotion_label, history=None, *, bounded=False):
             "temperature": 0.5,
             "max_tokens": 256,
         },
-        timeout=timeout,
+        timeout=(3, timeout),
     )
     response.raise_for_status()
     reply = response.json()["choices"][0]["message"]["content"]
@@ -177,6 +172,19 @@ def storage_error(error):
     return jsonify({"status": "error", "msg": "会话保存失败，请稍后重试"}), 503
 
 
+def _int_arg(name, default=None, *, minimum=0, maximum=None):
+    raw = request.args.get(name)
+    if raw is None or raw == '':
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        abort(400, f'参数 {name} 须为整数')
+    if value < minimum or (maximum is not None and value > maximum):
+        abort(400, f'参数 {name} 超出允许范围')
+    return value
+
+
 @app.route('/api/sessions', methods=['GET', 'POST'])
 def sessions():
     data = request.get_json(silent=True) if request.method == 'POST' else request.args
@@ -187,7 +195,15 @@ def sessions():
         request_id = request_identity(data)
         return jsonify({"status": "success", "session": conversation_store.create(user_id, request_id, fingerprint({})),
                         "request_id": request_id}), 201
-    return jsonify({"status": "success", "sessions": conversation_store.list(user_id)})
+    limit = _int_arg('limit', 50, minimum=1, maximum=100)
+    offset = _int_arg('offset', 0, minimum=0)
+    items, has_more = conversation_store.list_page(user_id, limit=limit, offset=offset)
+    return jsonify({
+        "status": "success",
+        "sessions": items,
+        "has_more": has_more,
+        "next_offset": offset + len(items) if has_more else None,
+    })
 
 
 @app.route('/api/sessions/<session_id>/messages', methods=['GET'])
@@ -196,28 +212,44 @@ def session_messages(session_id):
     session = conversation_store.get(session_id, user_id)
     if not session:
         return jsonify({"status": "error", "msg": "对话不存在"}), 404
-    messages = conversation_store.messages(session_id)
-    texts, count = conversation_store.user_evidence(session_id, limit=5)
-    if texts and messages and messages[-1]['role'] == 'assistant' and messages[-1]['chat_route'] in ('support', 'mixed'):
-        reference = emotion_reference_policy.assess(texts[:-1], texts[-1], count)
-        messages[-1]['emotion_reference'] = reference
-        # Update only the derived reference, keeping raw predictions and content intact.
-        with conversation_store.connect() as db:
-            db.execute('UPDATE chat_message SET emotion_reference=? WHERE id=?',
-                       (json.dumps(reference,ensure_ascii=False), messages[-1]['id']))
-    return jsonify({"status": "success", "session": session, "messages": messages})
+    limit = _int_arg('limit', 100, minimum=1, maximum=200)
+    before_id = _int_arg('before_id', None, minimum=1)
+    messages, has_more, next_before_id = conversation_store.messages_page(session_id, limit=limit, before_id=before_id)
+    if before_id is None:
+        texts, count = conversation_store.user_evidence(session_id, limit=5)
+        if texts and messages and messages[-1]['role'] == 'assistant' and messages[-1]['chat_route'] in ('support', 'mixed') and messages[-1].get('feedback') is None:
+            reference = emotion_reference_policy.assess(texts[:-1], texts[-1], count)
+            if reference != messages[-1]['emotion_reference']:
+                messages[-1]['emotion_reference'] = reference
+                # Update only the derived reference, keeping raw predictions and content intact.
+                with conversation_store.connect() as db:
+                    db.execute('UPDATE chat_message SET emotion_reference=? WHERE id=?',
+                               (json.dumps(reference, ensure_ascii=False), messages[-1]['id']))
+    return jsonify({
+        "status": "success",
+        "session": session,
+        "messages": messages,
+        "has_more": has_more,
+        "next_before_id": next_before_id,
+    })
 
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def delete_session(session_id):
-    lock = conversation_locks.setdefault(session_id, Lock())
+    if not conversation_store.get(session_id, g.user_id):
+        return jsonify({"status": "error", "msg": "对话不存在"}), 404
+    lock = _get_conversation_lock(session_id)
     if not lock.acquire(blocking=False):
         return jsonify({"status": "error", "msg": "正在回复，请稍后再删除"}), 409
+    deleted = False
     try:
-        if not conversation_store.delete(session_id, g.user_id):
+        deleted = conversation_store.delete(session_id, g.user_id)
+        if not deleted:
             return jsonify({"status": "error", "msg": "对话不存在"}), 404
         return jsonify({"status": "success"})
     finally:
+        if deleted:
+            _release_conversation_lock(session_id, lock)
         lock.release()
 
 
@@ -238,6 +270,13 @@ def emotion_feedback(message_id):
     return jsonify({'status':'success','feedback':result})
 
 
+@app.route('/api/emotions/stats', methods=['GET'])
+def emotion_stats():
+    days = _int_arg('days', 90, minimum=1, maximum=365)
+    limit = _int_arg('limit', 200, minimum=1, maximum=500)
+    return jsonify({'status': 'success', **conversation_store.emotion_stats(g.user_id, days=days, detail_limit=limit)})
+
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.get_json(silent=True)
@@ -255,18 +294,21 @@ def chat():
     content_hash = fingerprint({'session_id': session_id, 'text': user_text})
     if session_id is None and ('request_id' in data or request.headers.get('X-Request-ID')):
         return jsonify(status='error', msg='请先创建对话，再使用请求编号发送消息'), 400
+    created_legacy_session = False
     if session_id is not None:
         if not isinstance(session_id, str) or not conversation_store.get(session_id, user_id):
             return jsonify({"status": "error", "msg": "对话不存在，请新建对话"}), 404
     else:
         # Compatibility: old clients may omit session_id and still get a single-turn reply.
         session_id = conversation_store.create(user_id)['id']
+        created_legacy_session = True
     previous = conversation_store.replay(user_id, request_id, content_hash)
     if previous is not None:
         return jsonify(previous)
-    lock = conversation_locks.setdefault(session_id, Lock())
+    lock = _get_conversation_lock(session_id)
     if not lock.acquire(blocking=False):
         return jsonify({"status": "error", "msg": "这段对话正在回复，请稍后再发"}), 409
+    cleaned_up_legacy = False
     try:
         # Read a revision before generation; another worker's committed turn must
         # not be followed by an answer generated from stale context.
@@ -286,8 +328,11 @@ def chat():
                     route = 'fallback'
                     reply = FIXED_REPLIES[route]
                     emotion_label = confidence = emotion_reference = None
-        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-            app.logger.warning("聊天模型调用或边界检查失败")
+        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
+            app.logger.warning("聊天模型调用或边界检查失败: %s", exc)
+            if created_legacy_session:
+                conversation_store.delete(session_id, user_id)
+                cleaned_up_legacy = True
             return jsonify({"status": "error", "msg": "暂时无法完成回复，请稍后重试"}), 502
         try:
             result = conversation_store.save_turn(
@@ -298,11 +343,13 @@ def chat():
                           "context_turns": len(history) // 2, "emotion_label": emotion_label,
                           "confidence": confidence, "emotion_reference": emotion_reference,
                           "reply": reply, "chat_route": route})
-        except (sqlite3.Error, pymysql.MySQLError, LookupError):
+        except (sqlite3.Error, LookupError):
             app.logger.exception("聊天记录写入失败")
             return jsonify({"status": "error", "msg": "聊天记录保存失败，请检查数据库"}), 503
         return jsonify(result)
     finally:
+        if cleaned_up_legacy:
+            _release_conversation_lock(session_id, lock)
         lock.release()
 
 

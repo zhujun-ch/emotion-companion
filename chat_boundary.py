@@ -59,7 +59,7 @@ def structured_decision(prompt, payload, choices, *, extract=False):
             'additionalProperties': False,
         },
         'options': {'temperature': 0, 'num_predict': 256 if extract else 48},
-    }, timeout=float(os.getenv('CHAT_BOUNDARY_TIMEOUT', '25')))
+    }, timeout=(3, float(os.getenv('CHAT_BOUNDARY_TIMEOUT', '25'))))
     response.raise_for_status()
     result = json.loads(response.json()['message']['content'])
     if not isinstance(result, dict) or set(result) != set(properties) or result['decision'] not in choices:

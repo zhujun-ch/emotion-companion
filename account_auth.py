@@ -154,11 +154,18 @@ class AccountAuth:
                 abort(400, '新密码须为 8 至 128 个字符')
             consume_attempt(self.connect, 'password', owner)
             with self.connect() as db:
-                db.execute('BEGIN IMMEDIATE')
                 row = db.execute('SELECT password_hash FROM user_account WHERE id=?', (owner,)).fetchone()
-                if row is None or not check_password_hash(row['password_hash'], data['current_password']):
-                    abort(401, '当前密码不正确')
-                db.execute('UPDATE user_account SET password_hash=? WHERE id=?', (generate_password_hash(password), owner))
+            if row is None or not check_password_hash(row['password_hash'], data['current_password']):
+                abort(401, '当前密码不正确')
+            new_hash = generate_password_hash(password)
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                updated = db.execute(
+                    'UPDATE user_account SET password_hash=? WHERE id=? AND password_hash=?',
+                    (new_hash, owner, row['password_hash']),
+                ).rowcount
+                if not updated:
+                    abort(409, '密码已变更，请重试')
                 db.execute('DELETE FROM user_login WHERE user_id=?', (owner,))
             return jsonify(status='success', msg='密码已更新，请在各端重新登录')
 

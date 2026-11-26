@@ -48,6 +48,8 @@ def main():
     parser.add_argument('--threads',type=int,default=6)
     parser.add_argument('--output',default='artifacts/emotion_cnn')
     args=parser.parse_args()
+    if args.epochs < 1:
+        parser.error('--epochs must be >= 1')
     torch.set_num_threads(args.threads); torch.set_num_interop_threads(2)
     random.seed(42); np.random.seed(42); torch.manual_seed(42)
     device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -81,7 +83,7 @@ def main():
     train_loader=loader(train,train_tokens,True); val_loader=loader(val,val_tokens)
     model=TextCNN(**config['model']).to(device)
     frequencies=np.bincount([LABELS.index(r['label']) for r in train],minlength=6)
-    weights=np.sqrt(frequencies.sum()/frequencies); weights=weights/weights.mean()
+    weights=np.sqrt(frequencies.sum()/np.maximum(frequencies,1)); weights=weights/weights.mean()
     criterion=torch.nn.CrossEntropyLoss(weight=torch.tensor(weights,dtype=torch.float32,device=device))
     opt=torch.optim.AdamW(model.parameters(),lr=.001,weight_decay=.01)
     scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(opt,mode='max',factor=.5,patience=1)

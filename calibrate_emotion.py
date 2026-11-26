@@ -1,5 +1,5 @@
 """Fit temperature on half of validation; choose class thresholds on the other half."""
-import hashlib,json,math
+import argparse,hashlib,json,math
 from pathlib import Path
 import numpy as np
 import torch
@@ -9,8 +9,11 @@ from torch.utils.data import DataLoader,TensorDataset
 from emotion_model import EmotionPredictor,LABELS,tokenize,encode
 from train_textcnn import load,clean
 
+parser=argparse.ArgumentParser()
+parser.add_argument('--output',default='artifacts/emotion_cnn')
+args=parser.parse_args()
 root=Path(__file__).resolve().parent
-out=root/'artifacts/emotion_cnn'
+out=root/args.output
 torch.set_num_threads(4)
 predictor=EmotionPredictor(out)
 rows,_=clean(load(sorted((root/'评测数据集/eval（刷榜数据集）').glob('*_labeled.txt'))))
